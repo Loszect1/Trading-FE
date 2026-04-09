@@ -1,26 +1,58 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #02050b;
+  --foreground: #f2f6ff;
+  --muted: #a2b0c4;
+  --surface: #0e1624;
+  --surface-soft: #172335;
+  --border: rgba(162, 184, 220, 0.34);
+  --accent: #2dd4bf;
+  --accent-soft: rgba(45, 212, 191, 0.16);
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --font-sans: var(--font-manrope);
+  --font-mono: var(--font-ibm-plex-mono);
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-manrope), sans-serif;
+  background-image:
+    radial-gradient(circle at 15% 18%, rgba(45, 212, 191, 0.1), transparent 28%),
+    radial-gradient(circle at 85% 0%, rgba(56, 189, 248, 0.1), transparent 22%),
+    linear-gradient(rgba(130, 161, 208, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(130, 161, 208, 0.04) 1px, transparent 1px);
+  background-size:
+    auto,
+    auto,
+    44px 44px,
+    44px 44px;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  letter-spacing: -0.02em;
+}
+
+* {
+  border-color: var(--border);
+}
+
+.glass-panel {
+  background: linear-gradient(160deg, rgba(16, 25, 39, 0.92), rgba(10, 17, 29, 0.94));
+  border: 1px solid var(--border);
+  box-shadow:
+    0 22px 46px rgba(0, 0, 0, 0.34),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.accent-ring {
+  box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.45), 0 8px 20px rgba(45, 212, 191, 0.22);
 }
