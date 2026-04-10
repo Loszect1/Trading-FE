@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 import { useToast } from "@/components/toast-provider";
 import { TOAST_MESSAGES } from "@/constants/toast-messages";
@@ -12,6 +13,7 @@ interface MarketTableProps {
 }
 
 export function MarketTable({ symbols }: MarketTableProps) {
+  const router = useRouter();
   const { showToast } = useToast();
   const [watchlist, setWatchlist] = useState<string[]>(() => {
     if (typeof window === "undefined") {
@@ -61,11 +63,18 @@ export function MarketTable({ symbols }: MarketTableProps) {
         </thead>
         <tbody>
           {symbols.map((item) => (
-            <tr key={`${item.symbol}-${item.exchange}`} className="border-t border-white/10 hover:bg-cyan-300/5">
+            <tr
+              key={`${item.symbol}-${item.exchange}`}
+              className="cursor-pointer border-t border-white/10 hover:bg-cyan-300/5"
+              onClick={() => router.push(`/symbol/${encodeURIComponent(item.symbol)}`)}
+            >
               <td className="px-4 py-3">
                 <button
                   type="button"
-                  onClick={() => toggleWatchlist(item.symbol)}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    toggleWatchlist(item.symbol);
+                  }}
                   className={`rounded-md px-2 py-1 text-xs font-medium ${
                     watchlistSet.has(item.symbol)
                       ? "bg-cyan-300/25 text-cyan-100"
@@ -81,13 +90,8 @@ export function MarketTable({ symbols }: MarketTableProps) {
               <td className="px-4 py-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <Link
-                    href={`/symbol/${item.symbol}`}
-                    className="rounded-md border border-white/20 px-3 py-1 text-xs font-semibold text-slate-100 transition hover:bg-white/10"
-                  >
-                    {UI_TEXT.market.table.viewDetail}
-                  </Link>
-                  <Link
                     href={`/trade?symbol=${encodeURIComponent(item.symbol)}&dnse=1`}
+                    onClick={(event) => event.stopPropagation()}
                     className="rounded-md border border-emerald-300/45 px-3 py-1 text-xs font-semibold text-emerald-100 transition hover:bg-emerald-400/15"
                   >
                     {UI_TEXT.market.table.dnseTrade}

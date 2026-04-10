@@ -72,7 +72,7 @@ export function WatchlistClient({ symbols }: WatchlistClientProps) {
               <td className="px-4 py-3">
                 <div className="flex flex-wrap gap-2">
                   <Link
-                    href={`/symbol/${item.symbol}`}
+                    href={`/symbol/${encodeURIComponent(item.symbol)}`}
                     className="rounded-md border border-white/20 px-3 py-1 text-xs font-semibold text-slate-100 transition hover:bg-white/10"
                   >
                     {UI_TEXT.watchlist.table.view}

@@ -1,7 +1,7 @@
 "use client";
 
 import type { FormEvent } from "react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useToast } from "@/components/toast-provider";
 import { TOAST_MESSAGES } from "@/constants/toast-messages";
 import { UI_TEXT } from "@/constants/ui-text";
@@ -9,6 +9,7 @@ import { hasDnseSession } from "@/lib/dnse-session";
 import {
   dnseAuthLogin,
   dnseAuthLogout,
+  fetchDnseAccountBalance,
   extractDnseRecords,
   fetchDnseAccount,
   fetchDnseDefaults,
@@ -23,7 +24,6 @@ const ORDER_TYPES = ["LO", "ATO", "ATC", "MOK", "MTL", "MP"] as const;
 
 interface DnseTradePanelProps {
   symbol: string;
-  defaultExpanded?: boolean;
 }
 
 function readInitialSubAccountFromEnv(): string {
@@ -33,9 +33,8 @@ function readInitialSubAccountFromEnv(): string {
   return (process.env.NEXT_PUBLIC_DNSE_DEFAULT_SUB_ACCOUNT ?? "").trim();
 }
 
-export function DnseTradePanel({ symbol, defaultExpanded = false }: DnseTradePanelProps) {
+export function DnseTradePanel({ symbol }: DnseTradePanelProps) {
   const { showToast } = useToast();
-  const [expanded, setExpanded] = useState(defaultExpanded);
   const [subAccount, setSubAccount] = useState(readInitialSubAccountFromEnv);
   const [formSymbol, setFormSymbol] = useState(symbol.toUpperCase());
   const [side, setSide] = useState<"buy" | "sell">("buy");
@@ -51,10 +50,9 @@ export function DnseTradePanel({ symbol, defaultExpanded = false }: DnseTradePan
   const [submitting, setSubmitting] = useState(false);
   const [otpSending, setOtpSending] = useState(false);
   const [accountLoading, setAccountLoading] = useState(false);
-  const [accountJson, setAccountJson] = useState<string>("");
-  const [subAccountsLine, setSubAccountsLine] = useState<string>("");
   const [sessionActive, setSessionActive] = useState(false);
   const [sessionLoginLoading, setSessionLoginLoading] = useState(false);
+  const didAutoLoadAccountRef = useRef(false);
 
   useEffect(() => {
     setFormSymbol(symbol.toUpperCase());
@@ -62,12 +60,9 @@ export function DnseTradePanel({ symbol, defaultExpanded = false }: DnseTradePan
 
   useEffect(() => {
     setSessionActive(hasDnseSession());
-  }, [expanded]);
+  }, []);
 
   useEffect(() => {
-    if (!expanded) {
-      return;
-    }
     let cancelled = false;
     void (async () => {
       const defaults = await fetchDnseDefaults();
@@ -80,7 +75,7 @@ export function DnseTradePanel({ symbol, defaultExpanded = false }: DnseTradePan
     return () => {
       cancelled = true;
     };
-  }, [expanded]);
+  }, []);
 
   const credsPayload = useCallback(() => {
     const u = username.trim();
@@ -92,15 +87,12 @@ export function DnseTradePanel({ symbol, defaultExpanded = false }: DnseTradePan
   }, [username, password]);
 
   const handleSessionLogin = async () => {
-    if (!username.trim() || !password) {
-      showToast(UI_TEXT.dnse.loginNeedCredentials, "error");
-      return;
-    }
     setSessionLoginLoading(true);
     try {
       await dnseAuthLogin(username.trim(), password);
       setSessionActive(true);
       setPassword("");
+      await handleLoadAccountInfo(false);
       showToast(TOAST_MESSAGES.dnseSessionSaved, "success");
     } catch (error) {
       const message = isAppError(error) ? error.message : TOAST_MESSAGES.dnseLoginFailed;
@@ -116,7 +108,7 @@ export function DnseTradePanel({ symbol, defaultExpanded = false }: DnseTradePan
     showToast(TOAST_MESSAGES.dnseSessionCleared, "success");
   };
 
-  const handleLoadAccountInfo = async () => {
+  const handleLoadAccountInfo = useCallback(async (showFeedback = true) => {
     setAccountLoading(true);
     try {
       const creds = credsPayload();
@@ -124,17 +116,34 @@ export function DnseTradePanel({ symbol, defaultExpanded = false }: DnseTradePan
       const accRows = extractDnseRecords(accRes);
       const subRows = extractDnseRecords(subRes);
       const nums = pickSubAccountNumbers(subRows);
-      setAccountJson(accRows[0] ? JSON.stringify(accRows[0], null, 2) : "(empty)");
-      setSubAccountsLine(nums.length > 0 ? nums.join(", ") : "(empty)");
+      const preferredSubAccount = subAccount.trim() || nums[0] || "";
+      const balanceRes = preferredSubAccount
+        ? await fetchDnseAccountBalance({ ...creds, sub_account: preferredSubAccount })
+        : null;
+      const balanceRows = balanceRes ? extractDnseRecords(balanceRes) : [];
+      void accRows;
+      void balanceRows;
       setSubAccount((prev) => (prev.trim() ? prev : nums[0] ?? prev));
-      showToast(TOAST_MESSAGES.dnseAccountLoaded, "success");
+      if (showFeedback) {
+        showToast(TOAST_MESSAGES.dnseAccountLoaded, "success");
+      }
     } catch (error) {
-      const message = isAppError(error) ? error.message : TOAST_MESSAGES.dnseAccountLoadFailed;
-      showToast(message, "error");
+      if (showFeedback) {
+        const message = isAppError(error) ? error.message : TOAST_MESSAGES.dnseAccountLoadFailed;
+        showToast(message, "error");
+      }
     } finally {
       setAccountLoading(false);
     }
-  };
+  }, [credsPayload, showToast, subAccount]);
+
+  useEffect(() => {
+    if (didAutoLoadAccountRef.current) {
+      return;
+    }
+    didAutoLoadAccountRef.current = true;
+    void handleLoadAccountInfo(false);
+  }, [handleLoadAccountInfo]);
 
   const handleRequestOtp = async () => {
     setOtpSending(true);
@@ -199,18 +208,10 @@ export function DnseTradePanel({ symbol, defaultExpanded = false }: DnseTradePan
 
   return (
     <section className="glass-panel rounded-xl p-4">
-      <button
-        type="button"
-        onClick={() => setExpanded((value) => !value)}
-        className="flex w-full items-center justify-between gap-2 text-left"
-      >
-        <span className="text-sm font-semibold text-cyan-100">{UI_TEXT.dnse.title}</span>
-        <span className="text-xs text-slate-400">{expanded ? UI_TEXT.dnse.collapse : UI_TEXT.dnse.expand}</span>
-      </button>
+      <p className="text-sm font-semibold text-cyan-100">{UI_TEXT.dnse.title}</p>
       <p className="mt-2 text-xs text-slate-400">{UI_TEXT.dnse.hint}</p>
 
-      {expanded ? (
-        <form onSubmit={handleSubmit} className="mt-4 space-y-3">
+      <form onSubmit={handleSubmit} className="mt-4 space-y-3">
           <p className="text-xs text-slate-500">{UI_TEXT.dnse.sessionHint}</p>
           <div className="flex flex-wrap items-center gap-2 rounded-lg border border-white/10 bg-slate-950/40 px-3 py-2">
             <span className="text-xs text-slate-300">
@@ -242,22 +243,10 @@ export function DnseTradePanel({ symbol, defaultExpanded = false }: DnseTradePan
             disabled={accountLoading}
             className="w-full rounded-md border border-cyan-300/35 bg-cyan-500/10 px-3 py-2 text-xs font-medium text-cyan-100 hover:bg-cyan-500/20 disabled:opacity-50 sm:w-auto"
           >
-            {accountLoading ? UI_TEXT.dnse.loadingAccountInfo : UI_TEXT.dnse.loadAccountInfo}
+            {accountLoading
+              ? UI_TEXT.dnse.loadingAccountInfo
+              : UI_TEXT.dnse.refreshAccountInfo}
           </button>
-          {accountJson || subAccountsLine ? (
-            <div className="grid gap-2 rounded-lg border border-white/10 bg-slate-950/40 p-3 text-xs text-slate-300 sm:grid-cols-2">
-              <div>
-                <p className="font-medium text-slate-200">{UI_TEXT.dnse.accountSummaryTitle}</p>
-                <pre className="mt-1 max-h-36 overflow-auto whitespace-pre-wrap break-all text-[11px] text-slate-400">
-                  {accountJson}
-                </pre>
-              </div>
-              <div>
-                <p className="font-medium text-slate-200">{UI_TEXT.dnse.subAccountsSummaryTitle}</p>
-                <p className="mt-1 font-mono text-[11px] text-emerald-200/90">{subAccountsLine}</p>
-              </div>
-            </div>
-          ) : null}
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="block text-xs text-slate-300">
               {UI_TEXT.dnse.subAccount}
@@ -362,27 +351,29 @@ export function DnseTradePanel({ symbol, defaultExpanded = false }: DnseTradePan
             </label>
           </div>
 
-          <div className="rounded-lg border border-white/10 bg-slate-950/35 p-3">
-            <p className="text-xs font-medium text-slate-300">{UI_TEXT.dnse.credentialsSection}</p>
-            <p className="mt-1 text-xs text-slate-500">{UI_TEXT.dnse.credentialsHint}</p>
-            <div className="mt-2 grid gap-2 sm:grid-cols-2">
-              <input
-                value={username}
-                onChange={(event) => setUsername(event.target.value)}
-                autoComplete="username"
-                className="h-9 rounded-md border border-white/15 bg-slate-950/55 px-2 text-xs text-slate-100 outline-none focus:border-cyan-300/40"
-                placeholder={UI_TEXT.dnse.usernamePlaceholder}
-              />
-              <input
-                type="password"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                autoComplete="current-password"
-                className="h-9 rounded-md border border-white/15 bg-slate-950/55 px-2 text-xs text-slate-100 outline-none focus:border-cyan-300/40"
-                placeholder={UI_TEXT.dnse.passwordPlaceholder}
-              />
+          {!sessionActive ? (
+            <div className="rounded-lg border border-white/10 bg-slate-950/35 p-3">
+              <p className="text-xs font-medium text-slate-300">{UI_TEXT.dnse.credentialsSection}</p>
+              <p className="mt-1 text-xs text-slate-500">{UI_TEXT.dnse.credentialsHint}</p>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                <input
+                  value={username}
+                  onChange={(event) => setUsername(event.target.value)}
+                  autoComplete="username"
+                  className="h-9 rounded-md border border-white/15 bg-slate-950/55 px-2 text-xs text-slate-100 outline-none focus:border-cyan-300/40"
+                  placeholder={UI_TEXT.dnse.usernamePlaceholder}
+                />
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  autoComplete="current-password"
+                  className="h-9 rounded-md border border-white/15 bg-slate-950/55 px-2 text-xs text-slate-100 outline-none focus:border-cyan-300/40"
+                  placeholder={UI_TEXT.dnse.passwordPlaceholder}
+                />
+              </div>
             </div>
-          </div>
+          ) : null}
 
           <label className="block text-xs text-slate-300">
             {UI_TEXT.dnse.otp}
@@ -423,8 +414,7 @@ export function DnseTradePanel({ symbol, defaultExpanded = false }: DnseTradePan
           >
             {submitting ? UI_TEXT.dnse.placing : UI_TEXT.dnse.placeOrder}
           </button>
-        </form>
-      ) : null}
+      </form>
     </section>
   );
 }

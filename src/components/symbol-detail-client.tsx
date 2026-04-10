@@ -9,12 +9,16 @@ import { UI_TEXT } from "@/constants/ui-text";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatNumber } from "@/lib/format";
 import {
+  analyzeSymbolWithAi,
+  analyzeSymbolWithAiShortTechnical,
   getCompanyNews,
   getCompanyOverview,
   getFinancialRatioSummary,
   getPriceHistory,
 } from "@/services/vnstock.api";
 import type {
+  AiDataCompleteness,
+  AiStructuredAnalysis,
   CandlePoint,
   CompanyNewsItem,
   CompanyOverview,
@@ -74,8 +78,90 @@ export function SymbolDetailClient({
   const [interval, setInterval] = useState<Interval>("1D");
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+  const [aiLoading, setAiLoading] = useState(false);
+  const [shortAiLoading, setShortAiLoading] = useState(false);
+  const [aiAnalysis, setAiAnalysis] = useState("");
+  const [shortAiAnalysis, setShortAiAnalysis] = useState("");
+  const [aiStructured, setAiStructured] = useState<AiStructuredAnalysis | null>(null);
+  const [aiCompleteness, setAiCompleteness] = useState<AiDataCompleteness | null>(null);
+  const [showRawAiAnalysis, setShowRawAiAnalysis] = useState(false);
+  const [aiInterval, setAiInterval] = useState<Interval>("1D");
+  const [aiLookbackDays, setAiLookbackDays] = useState(90);
   const loadSourceRef = useRef<"init" | "user" | "auto">("init");
   const didSkipInitialFetchRef = useRef(false);
+
+  function normalizeHeading(value: string): string {
+    return value
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/đ/g, "d")
+      .replace(/Đ/g, "d")
+      .toLowerCase()
+      .trim();
+  }
+
+  function parseShortAnalysisSections(raw: string): {
+    buyPoint: string;
+    conditions: string;
+    sellPoint: string;
+    stopLoss: string;
+  } {
+    const lines = raw.split("\n");
+    const sections: Record<string, string[]> = {
+      buy: [],
+      conditions: [],
+      sell: [],
+      stop: [],
+    };
+    let current: "buy" | "conditions" | "sell" | "stop" | null = null;
+
+    for (const line of lines) {
+      const normalized = normalizeHeading(
+        line
+          .replace(/^#+\s*/, "")
+          .replace(/^[0-9]+[\).\-\s]*/, "")
+          .replace(/\*\*/g, "")
+          .replace(/:/g, ""),
+      );
+      if (normalized.includes("diem mua")) {
+        current = "buy";
+        continue;
+      }
+      if (normalized.includes("dieu kien")) {
+        current = "conditions";
+        continue;
+      }
+      if (normalized.includes("diem ban")) {
+        current = "sell";
+        continue;
+      }
+      if (
+        normalized.includes("stop loss") ||
+        normalized.includes("stoploss") ||
+        normalized.includes("cat lo") ||
+        normalized.includes("diem cat lo")
+      ) {
+        current = "stop";
+        continue;
+      }
+      if (current) {
+        sections[current].push(line);
+      }
+    }
+
+    const clean = (items: string[]) =>
+      items
+        .join("\n")
+        .replace(/^\s+|\s+$/g, "")
+        .replace(/\n{3,}/g, "\n\n");
+
+    return {
+      buyPoint: clean(sections.buy),
+      conditions: clean(sections.conditions),
+      sellPoint: clean(sections.sell),
+      stopLoss: clean(sections.stop),
+    };
+  }
 
   useEffect(() => {
     let isCancelled = false;
@@ -184,7 +270,75 @@ export function SymbolDetailClient({
     <>
       <section>
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <div />
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              value={aiInterval}
+              onChange={(event) => setAiInterval(event.target.value as Interval)}
+              className="h-8 rounded-md border border-slate-500/40 bg-slate-950/75 px-2 text-xs text-slate-100 outline-none transition focus:border-purple-300/70 focus:ring-2 focus:ring-purple-400/25"
+            >
+              {intervals.map((item) => (
+                <option key={item} value={item}>
+                  {item}
+                </option>
+              ))}
+            </select>
+            <input
+              type="number"
+              value={aiLookbackDays}
+              min={7}
+              max={365}
+              onChange={(event) => {
+                const parsed = Number.parseInt(event.target.value, 10);
+                if (Number.isNaN(parsed)) {
+                  setAiLookbackDays(90);
+                  return;
+                }
+                setAiLookbackDays(Math.max(7, Math.min(365, parsed)));
+              }}
+              className="h-8 w-24 rounded-md border border-slate-500/40 bg-slate-950/75 px-2 text-xs text-slate-100 outline-none transition focus:border-purple-300/70 focus:ring-2 focus:ring-purple-400/25"
+            />
+            <button
+              type="button"
+              onClick={async () => {
+                setAiLoading(true);
+                try {
+                  const result = await analyzeSymbolWithAi(symbol, aiInterval, aiLookbackDays);
+                  setAiAnalysis(result.analysis);
+                  setAiStructured(result.structured);
+                  setAiCompleteness(result.dataCompleteness);
+                  setShowRawAiAnalysis(false);
+                } catch (error) {
+                  const message = error instanceof Error ? error.message : UI_TEXT.symbol.loadFailed;
+                  showToast(message, "error");
+                } finally {
+                  setAiLoading(false);
+                }
+              }}
+              disabled={aiLoading}
+              className="h-9 rounded-md border border-purple-200/60 bg-gradient-to-r from-purple-500/80 to-fuchsia-500/80 px-4 py-1.5 text-xs font-bold tracking-wide text-white shadow-[0_0_0_1px_rgba(255,255,255,0.08),0_10px_25px_rgba(168,85,247,0.35)] ring-1 ring-purple-300/40 transition hover:-translate-y-0.5 hover:from-purple-400 hover:to-fuchsia-400 hover:shadow-[0_0_0_1px_rgba(255,255,255,0.12),0_14px_30px_rgba(192,132,252,0.45)] active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:translate-y-0"
+            >
+              {aiLoading ? UI_TEXT.symbol.aiLoading : UI_TEXT.symbol.aiAnalyze}
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                setShortAiLoading(true);
+                try {
+                  const result = await analyzeSymbolWithAiShortTechnical(symbol, aiInterval, aiLookbackDays);
+                  setShortAiAnalysis(result);
+                } catch (error) {
+                  const message = error instanceof Error ? error.message : UI_TEXT.symbol.loadFailed;
+                  showToast(message, "error");
+                } finally {
+                  setShortAiLoading(false);
+                }
+              }}
+              disabled={shortAiLoading}
+              className="h-9 rounded-md border border-cyan-300/50 bg-cyan-400/15 px-4 py-1.5 text-xs font-bold tracking-wide text-cyan-100 transition hover:bg-cyan-400/25 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {shortAiLoading ? UI_TEXT.symbol.shortAiLoading : UI_TEXT.symbol.shortAiAnalyze}
+            </button>
+          </div>
           <div className="flex gap-2">
             {intervals.map((item) => (
               <button
@@ -218,6 +372,171 @@ export function SymbolDetailClient({
           </p>
         ) : null}
         <PriceChart data={chartData} />
+      </section>
+
+      <section className="glass-panel rounded-xl p-6">
+        <h2 className="text-lg font-semibold text-slate-100">{UI_TEXT.symbol.aiTitle}</h2>
+        {aiAnalysis ? (
+          <div className="mt-3 space-y-4">
+            {aiCompleteness ? (
+              <div className="grid gap-2 rounded-lg border border-white/10 bg-slate-950/45 p-3 text-xs text-slate-300 sm:grid-cols-5">
+                <p>Overall: {aiCompleteness.overall ?? "-"}</p>
+                <p>Market: {aiCompleteness.market ?? "-"}</p>
+                <p>Fundamentals: {aiCompleteness.fundamentals ?? "-"}</p>
+                <p>News: {aiCompleteness.news ?? "-"}</p>
+                <p>Social: {aiCompleteness.social_sentiment ?? "-"}</p>
+              </div>
+            ) : null}
+
+            {aiStructured ? (
+              <div className="space-y-3">
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <div className="rounded-lg border border-emerald-300/30 bg-emerald-400/10 p-3">
+                    <p className="text-xs text-emerald-200">Bias</p>
+                    <p className="text-sm font-semibold text-emerald-100">{aiStructured.bias ?? "-"}</p>
+                  </div>
+                  <div className="rounded-lg border border-cyan-300/30 bg-cyan-300/10 p-3">
+                    <p className="text-xs text-cyan-200">Confidence</p>
+                    <p className="text-sm font-semibold text-cyan-100">
+                      {typeof aiStructured.confidence === "number" ? `${aiStructured.confidence}/10` : "-"}
+                    </p>
+                  </div>
+                </div>
+
+                {aiStructured.executive_summary ? (
+                  <article className="rounded-lg border border-white/10 bg-slate-950/45 p-3">
+                    <p className="text-xs font-semibold tracking-wide text-cyan-200">Executive Summary</p>
+                    <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-200">{aiStructured.executive_summary}</p>
+                  </article>
+                ) : null}
+                {aiStructured.market_analysis ? (
+                  <article className="rounded-lg border border-white/10 bg-slate-950/45 p-3">
+                    <p className="text-xs font-semibold tracking-wide text-cyan-200">Market Analysis</p>
+                    <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-200">{aiStructured.market_analysis}</p>
+                  </article>
+                ) : null}
+                {aiStructured.fundamentals_analysis ? (
+                  <article className="rounded-lg border border-white/10 bg-slate-950/45 p-3">
+                    <p className="text-xs font-semibold tracking-wide text-cyan-200">Fundamentals Analysis</p>
+                    <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-200">{aiStructured.fundamentals_analysis}</p>
+                  </article>
+                ) : null}
+                {aiStructured.news_analysis ? (
+                  <article className="rounded-lg border border-white/10 bg-slate-950/45 p-3">
+                    <p className="text-xs font-semibold tracking-wide text-cyan-200">News Analysis</p>
+                    <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-200">{aiStructured.news_analysis}</p>
+                  </article>
+                ) : null}
+                {aiStructured.social_sentiment_analysis ? (
+                  <article className="rounded-lg border border-white/10 bg-slate-950/45 p-3">
+                    <p className="text-xs font-semibold tracking-wide text-cyan-200">Social Sentiment Analysis</p>
+                    <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-200">{aiStructured.social_sentiment_analysis}</p>
+                  </article>
+                ) : null}
+
+                {aiStructured.risk_matrix && aiStructured.risk_matrix.length > 0 ? (
+                  <div className="overflow-x-auto rounded-lg border border-white/10">
+                    <table className="w-full min-w-[520px] text-left text-xs">
+                      <thead className="bg-white/[0.03] text-slate-300">
+                        <tr>
+                          <th className="px-3 py-2">Risk</th>
+                          <th className="px-3 py-2">Probability</th>
+                          <th className="px-3 py-2">Impact</th>
+                          <th className="px-3 py-2">Monitoring</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {aiStructured.risk_matrix.map((item, idx) => (
+                          <tr key={`${item.risk}-${idx}`} className="border-t border-white/10 text-slate-200">
+                            <td className="px-3 py-2">{item.risk}</td>
+                            <td className="px-3 py-2">{item.probability}</td>
+                            <td className="px-3 py-2">{item.impact}</td>
+                            <td className="px-3 py-2">{item.monitoring}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : null}
+
+                {aiStructured.trading_watchlist_plan ? (
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    <div className="rounded-lg border border-emerald-300/30 bg-emerald-400/10 p-3 text-sm text-emerald-100">
+                      <p className="text-xs font-semibold">Bull</p>
+                      <p className="mt-1 whitespace-pre-wrap">{aiStructured.trading_watchlist_plan.bull ?? "-"}</p>
+                    </div>
+                    <div className="rounded-lg border border-cyan-300/30 bg-cyan-300/10 p-3 text-sm text-cyan-100">
+                      <p className="text-xs font-semibold">Base</p>
+                      <p className="mt-1 whitespace-pre-wrap">{aiStructured.trading_watchlist_plan.base ?? "-"}</p>
+                    </div>
+                    <div className="rounded-lg border border-rose-300/30 bg-rose-400/10 p-3 text-sm text-rose-100">
+                      <p className="text-xs font-semibold">Bear</p>
+                      <p className="mt-1 whitespace-pre-wrap">{aiStructured.trading_watchlist_plan.bear ?? "-"}</p>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
+            <div>
+              <button
+                type="button"
+                onClick={() => setShowRawAiAnalysis((prev) => !prev)}
+                className="rounded-md border border-white/20 px-3 py-1 text-xs font-semibold text-slate-200 transition hover:bg-white/10"
+              >
+                {showRawAiAnalysis ? "Hide raw analysis" : "Show raw analysis"}
+              </button>
+              {showRawAiAnalysis ? (
+                <pre className="mt-2 max-h-96 overflow-auto whitespace-pre-wrap text-sm leading-6 text-slate-300">
+                  {aiAnalysis}
+                </pre>
+              ) : null}
+            </div>
+          </div>
+        ) : (
+          <p className="mt-3 text-sm text-slate-400">{UI_TEXT.symbol.aiEmpty}</p>
+        )}
+      </section>
+
+      <section className="glass-panel rounded-xl p-6">
+        <h2 className="text-lg font-semibold text-slate-100">Short Technical Setup</h2>
+        {shortAiAnalysis ? (
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            {(() => {
+              const parsed = parseShortAnalysisSections(shortAiAnalysis);
+              return (
+                <>
+                  <article className="rounded-lg border border-emerald-300/30 bg-emerald-400/10 p-3">
+                    <p className="text-xs font-semibold tracking-wide text-emerald-200">Diem mua</p>
+                    <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-emerald-100">
+                      {parsed.buyPoint || "-"}
+                    </p>
+                  </article>
+                  <article className="rounded-lg border border-cyan-300/30 bg-cyan-300/10 p-3">
+                    <p className="text-xs font-semibold tracking-wide text-cyan-200">Dieu kien</p>
+                    <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-cyan-100">
+                      {parsed.conditions || "-"}
+                    </p>
+                  </article>
+                  <article className="rounded-lg border border-purple-300/30 bg-purple-400/10 p-3">
+                    <p className="text-xs font-semibold tracking-wide text-purple-200">Diem ban</p>
+                    <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-purple-100">
+                      {parsed.sellPoint || "-"}
+                    </p>
+                  </article>
+                  <article className="rounded-lg border border-rose-300/30 bg-rose-400/10 p-3">
+                    <p className="text-xs font-semibold tracking-wide text-rose-200">Stop loss</p>
+                    <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-rose-100">
+                      {parsed.stopLoss || "-"}
+                    </p>
+                  </article>
+                </>
+              );
+            })()}
+          </div>
+        ) : (
+          <p className="mt-3 text-sm text-slate-400">No short technical setup yet. Press Short AI Analyze.</p>
+        )}
       </section>
 
       <section className="glass-panel rounded-xl p-6">

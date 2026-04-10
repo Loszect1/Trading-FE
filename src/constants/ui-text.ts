@@ -69,6 +69,12 @@ export const UI_TEXT = {
     news: "News",
     noNews: "No news available.",
     priceChart: "Price chart",
+    aiAnalyze: "AI Analyze",
+    shortAiAnalyze: "Short AI Analyze",
+    aiTitle: "AI Analysis",
+    aiLoading: "AI is analyzing this symbol...",
+    shortAiLoading: "AI is generating short technical setup...",
+    aiEmpty: "No AI analysis yet. Press AI Analyze.",
     openTrade: "Open Trade",
     dnseTrade: "Trade DNSE",
     loadFailed: "Load symbol detail failed",
@@ -97,8 +103,6 @@ export const UI_TEXT = {
   },
   dnse: {
     title: "Giao dich DNSE (API /dnse)",
-    expand: "Mo form",
-    collapse: "Thu gon",
     hint:
       "Can OTP giao dich (Smart OTP hoac email). User/pass co the de trong neu backend da set DNSE_USERNAME/DNSE_PASSWORD.",
     subAccount: "Sub account (accountNo)",
@@ -122,6 +126,7 @@ export const UI_TEXT = {
     loadingAccountInfo: "Dang tai...",
     accountSummaryTitle: "Tai khoan (API /dnse/account)",
     subAccountsSummaryTitle: "Sub-account (API /dnse/sub-accounts)",
+    accountBalanceSummaryTitle: "Account balance (API /dnse/account-balance)",
     accountInfoHint:
       "Dung user/pass o tren hoac DNSE_USERNAME/DNSE_PASSWORD tren BE. Sub-account trong trong se tu dien neu API tra ve.",
     sessionHint:
@@ -131,6 +136,7 @@ export const UI_TEXT = {
     sessionLogin: "Dang nhap (auth/login)",
     sessionLoggingIn: "Dang dang nhap...",
     sessionLogout: "Dang xuat phien",
+    refreshAccountInfo: "Tai lai thong tin",
     loginNeedCredentials: "Nhap username va password de dang nhap.",
     otp: "OTP giao dich",
     requestEmailOtp: "Gui OTP email",

@@ -16,6 +16,7 @@ interface RetryCacheOptions {
   retries?: number;
   retryDelayMs?: number;
   cacheTtlMs?: number;
+  timeoutMs?: number;
 }
 
 interface CacheEntry {
@@ -55,6 +56,7 @@ export async function postWithRetryCache<TResponse>(
   const retries = options?.retries ?? 1;
   const retryDelayMs = options?.retryDelayMs ?? 500;
   const cacheTtlMs = options?.cacheTtlMs ?? 10000;
+  const timeoutMs = options?.timeoutMs;
   const cacheKey = buildCacheKey(path, payload);
   const now = Date.now();
 
@@ -66,7 +68,48 @@ export async function postWithRetryCache<TResponse>(
   let attempt = 0;
   while (attempt <= retries) {
     try {
-      const response = await httpClient.post<TResponse>(path, payload);
+      const response = await httpClient.post<TResponse>(path, payload, {
+        timeout: timeoutMs,
+      });
+      responseCache.set(cacheKey, {
+        expiresAt: Date.now() + cacheTtlMs,
+        data: response.data,
+      });
+      return response.data;
+    } catch (error) {
+      if (attempt >= retries || !shouldRetry(error)) {
+        throw error;
+      }
+      await sleep(retryDelayMs);
+      attempt += 1;
+    }
+  }
+
+  throw new Error("Request retry failed");
+}
+
+export async function getWithRetryCache<TResponse>(
+  path: string,
+  options?: RetryCacheOptions,
+): Promise<TResponse> {
+  const retries = options?.retries ?? 1;
+  const retryDelayMs = options?.retryDelayMs ?? 500;
+  const cacheTtlMs = options?.cacheTtlMs ?? 10000;
+  const timeoutMs = options?.timeoutMs;
+  const cacheKey = buildCacheKey(path, null);
+  const now = Date.now();
+
+  const cached = responseCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    return cached.data as TResponse;
+  }
+
+  let attempt = 0;
+  while (attempt <= retries) {
+    try {
+      const response = await httpClient.get<TResponse>(path, {
+        timeout: timeoutMs,
+      });
       responseCache.set(cacheKey, {
         expiresAt: Date.now() + cacheTtlMs,
         data: response.data,

@@ -44,14 +44,12 @@ async function loadTradingData(symbol: string): Promise<TradePageData> {
 }
 
 interface TradePageProps {
-  searchParams?: Promise<{ symbol?: string; dnse?: string }>;
+  searchParams?: Promise<{ symbol?: string }>;
 }
 
 export default async function TradePage({ searchParams }: TradePageProps) {
   const resolvedSearchParams = searchParams ? await searchParams : undefined;
   const requestedSymbol = resolvedSearchParams?.symbol?.toUpperCase().trim();
-  const initialDnseOpen =
-    resolvedSearchParams?.dnse === "1" || resolvedSearchParams?.dnse === "true";
 
   let symbols: SymbolItem[] = [];
   try {
@@ -89,7 +87,6 @@ export default async function TradePage({ searchParams }: TradePageProps) {
             initialSideStats={sideStats}
             initialForeignTrade={foreignTrade}
             initialPropTrade={propTrade}
-            initialDnseOpen={initialDnseOpen}
           />
         )}
       </main>

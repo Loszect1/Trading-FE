@@ -24,11 +24,17 @@ export interface DnseEmailOtpPayload {
   access_token?: string;
 }
 
-export async function dnseAuthLogin(username: string, password: string): Promise<string> {
+export async function dnseAuthLogin(username?: string, password?: string): Promise<string> {
   try {
+    const payload: Record<string, string> = {};
+    const u = (username ?? "").trim();
+    const p = password ?? "";
+    if (u) payload.username = u;
+    if (p) payload.password = p;
+
     const response = await httpClient.post<{ success?: boolean; token?: string }>(
       "/dnse/auth/login",
-      { username, password },
+      payload,
       { timeout: DNSE_REQUEST_TIMEOUT_MS },
     );
     const token = response.data?.token;
@@ -133,6 +139,20 @@ export async function fetchDnseSubAccounts(payload: DnseEmailOtpPayload): Promis
   try {
     const body = applyDnseSessionAuth({ ...payload } as Record<string, unknown>);
     const response = await httpClient.post<Record<string, unknown>>("/dnse/sub-accounts", body, {
+      timeout: DNSE_REQUEST_TIMEOUT_MS,
+    });
+    return response.data;
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function fetchDnseAccountBalance(
+  payload: DnseEmailOtpPayload & { sub_account: string },
+): Promise<Record<string, unknown>> {
+  try {
+    const body = applyDnseSessionAuth({ ...payload } as Record<string, unknown>);
+    const response = await httpClient.post<Record<string, unknown>>("/dnse/account-balance", body, {
       timeout: DNSE_REQUEST_TIMEOUT_MS,
     });
     return response.data;

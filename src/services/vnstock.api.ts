@@ -1,9 +1,14 @@
-import { normalizeError, postWithRetryCache } from "@/services/http-client";
+import { getWithRetryCache, normalizeError, postWithRetryCache } from "@/services/http-client";
 import type {
+  AiAnalyzeSymbolResult,
+  AiDataCompleteness,
+  AiStructuredAnalysis,
   CandlePoint,
   CompanyNewsItem,
   CompanyOverview,
   FinancialRatioPoint,
+  MarketScannerItem,
+  MarketScannerResult,
   SymbolItem,
   TradeMetricRow,
   TradeStats,
@@ -48,7 +53,7 @@ export async function getCompanyOverview(symbol: string): Promise<CompanyOvervie
     const response = await postWithRetryCache<Record<string, unknown>>(
       "/vnstock-api/company/overview",
       { symbol },
-      { cacheTtlMs: 15000, retries: 1 },
+      { cacheTtlMs: 15000, retries: 3, retryDelayMs: 800 },
     );
     const raw = response?.data ?? response;
     const itemFromArray = Array.isArray(raw) ? (raw[0] as Record<string, unknown> | undefined) : undefined;
@@ -149,7 +154,7 @@ export async function getPriceHistory(symbol: string, interval = "1D"): Promise<
     const response = await postWithRetryCache<Record<string, unknown>>(
       "/vnstock-api/quote/history",
       payload,
-      { cacheTtlMs: 10000, retries: 1 },
+      { cacheTtlMs: 10000, retries: 3, retryDelayMs: 800 },
     );
     const raw = response?.data ?? response;
     return mapHistoryRows(raw);
@@ -234,7 +239,7 @@ export async function getCompanyNews(symbol: string): Promise<CompanyNewsItem[]>
     const response = await postWithRetryCache<Record<string, unknown>>(
       "/vnstock-api/company/news",
       { symbol },
-      { cacheTtlMs: 15000, retries: 1 },
+      { cacheTtlMs: 15000, retries: 3, retryDelayMs: 800 },
     );
     const raw = response?.data ?? response;
     const list = pickArray<Record<string, unknown>>(raw);
@@ -279,7 +284,7 @@ export async function getFinancialRatioSummary(symbol: string): Promise<Financia
     const response = await postWithRetryCache<Record<string, unknown>>(
       "/vnstock-api/financial/ratio",
       { symbol, source: "VCI", period: "quarter", get_all: true, method_kwargs: {} },
-      { cacheTtlMs: 15000, retries: 1 },
+      { cacheTtlMs: 15000, retries: 3, retryDelayMs: 800 },
     );
 
     const raw = response?.data ?? response;
@@ -382,6 +387,122 @@ export async function getPropTrade(symbol: string): Promise<TradeMetricRow[]> {
     );
     const raw = response?.data ?? response;
     return toMetricRows(raw);
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function analyzeSymbolWithAi(
+  symbol: string,
+  interval = "1D",
+  lookbackDays = 90,
+): Promise<AiAnalyzeSymbolResult> {
+  try {
+    const response = await postWithRetryCache<Record<string, unknown>>(
+      "/ai/analyze-symbol",
+      {
+        symbol,
+        interval,
+        lookback_days: lookbackDays,
+        source: "VCI",
+        model: "claude-sonnet-4-6",
+        max_tokens: 5000,
+        temperature: 0.2,
+      },
+      { cacheTtlMs: 24 * 60 * 60 * 1000, retries: 0, timeoutMs: 600000 },
+    );
+    const raw = response?.data ?? response;
+    const item = pickObject<Record<string, unknown>>(raw);
+    const analysis = item?.analysis;
+    const structuredRaw = item?.analysis_structured;
+    const completenessRaw = item?.data_completeness;
+    if (typeof analysis === "string" && analysis.trim().length > 0) {
+      return {
+        analysis: analysis.trim(),
+        structured: pickObject<AiStructuredAnalysis>(structuredRaw),
+        dataCompleteness: pickObject<AiDataCompleteness>(completenessRaw),
+      };
+    }
+    throw new Error("AI returned empty analysis");
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function analyzeSymbolWithAiShortTechnical(
+  symbol: string,
+  interval = "1D",
+  lookbackDays = 90,
+): Promise<string> {
+  try {
+    const response = await postWithRetryCache<Record<string, unknown>>(
+      "/ai/analyze-symbol-short",
+      {
+        symbol,
+        interval,
+        lookback_days: lookbackDays,
+        source: "VCI",
+        model: "claude-sonnet-4-6",
+        max_tokens: 1200,
+        temperature: 0.2,
+      },
+      { cacheTtlMs: 24 * 60 * 60 * 1000, retries: 0, timeoutMs: 600000 },
+    );
+    const raw = response?.data ?? response;
+    const item = pickObject<Record<string, unknown>>(raw);
+    const analysis = item?.analysis;
+    if (typeof analysis === "string" && analysis.trim().length > 0) {
+      return analysis.trim();
+    }
+    throw new Error("AI returned empty short analysis");
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function getMarketScannerTop(
+  days = 7,
+  topN = 5,
+  forceRefresh = false,
+  useAi = false,
+): Promise<MarketScannerResult> {
+  try {
+    const response = await getWithRetryCache<Record<string, unknown>>(
+      `/market/scanner-top?days=${encodeURIComponent(days)}&top_n=${encodeURIComponent(topN)}&force_refresh=${forceRefresh ? "true" : "false"}&use_ai=${useAi ? "true" : "false"}&max_scan_per_exchange=20`,
+      { cacheTtlMs: forceRefresh ? 0 : 24 * 60 * 60 * 1000, retries: 0, timeoutMs: 120000 },
+    );
+    const raw = response?.data ?? response;
+    const item = pickObject<Record<string, unknown>>(raw);
+    if (!item) {
+      throw new Error("Invalid scanner response");
+    }
+
+    const byExchangeRaw = pickObject<Record<string, unknown>>(item.by_exchange) ?? {};
+    const by_exchange: Record<string, MarketScannerItem[]> = {};
+    for (const [exchange, value] of Object.entries(byExchangeRaw)) {
+      const rows = pickArray<Record<string, unknown>>(value).map((row) => ({
+        symbol: String(row.symbol ?? ""),
+        exchange: String(row.exchange ?? exchange),
+        turnover_window: Number(row.turnover_window ?? row.turnover_7d ?? 0),
+        avg_volume_window: Number(row.avg_volume_window ?? row.avg_volume_7d ?? 0),
+        latest_volume: Number(row.latest_volume ?? 0),
+        baseline_avg_volume: Number(row.baseline_avg_volume ?? 0),
+        volume_spike_ratio: Number(row.volume_spike_ratio ?? 0),
+        spike_score: Number(row.spike_score ?? 0),
+        close_latest: Number(row.close_latest ?? 0),
+      }));
+      by_exchange[exchange] = rows.filter((row) => row.symbol.length > 0);
+    }
+
+    return {
+      scanned_days: Number(item.scanned_days ?? days),
+      as_of: String(item.as_of ?? ""),
+      by_exchange,
+      ai_risk_by_exchange:
+        pickObject<Record<string, Record<string, string>>>(item.ai_risk_by_exchange) ?? undefined,
+      ai_reasoning_by_exchange:
+        pickObject<Record<string, string>>(item.ai_reasoning_by_exchange) ?? undefined,
+    };
   } catch (error) {
     throw normalizeError(error);
   }

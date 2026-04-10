@@ -22,7 +22,6 @@ interface TradeClientProps {
   initialSideStats: TradeMetricRow[];
   initialForeignTrade: TradeMetricRow[];
   initialPropTrade: TradeMetricRow[];
-  initialDnseOpen?: boolean;
 }
 
 export function TradeClient({
@@ -32,7 +31,6 @@ export function TradeClient({
   initialSideStats,
   initialForeignTrade,
   initialPropTrade,
-  initialDnseOpen = false,
 }: TradeClientProps) {
   const { showToast } = useToast();
   const [selectedSymbol, setSelectedSymbol] = useState(initialSymbol);
@@ -133,7 +131,7 @@ export function TradeClient({
           ))}
         </select>
       </div>
-      <DnseTradePanel symbol={selectedSymbol} defaultExpanded={initialDnseOpen} />
+      <DnseTradePanel symbol={selectedSymbol} />
       {loading ? (
         <div className="space-y-2">
           <Skeleton className="h-3 w-28" />
