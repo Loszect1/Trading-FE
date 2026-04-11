@@ -22,6 +22,7 @@ import type {
   CandlePoint,
   CompanyNewsItem,
   CompanyOverview,
+  FinancialRatioPeriod,
   FinancialRatioPoint,
 } from "@/types/vnstock";
 
@@ -411,6 +412,8 @@ export function SymbolDetailClient({
   const [chartData, setChartData] = useState<CandlePoint[]>(initialChartData);
   const [news, setNews] = useState<CompanyNewsItem[]>([]);
   const [ratioSummary, setRatioSummary] = useState<FinancialRatioPoint[]>([]);
+  const [ratioPeriod, setRatioPeriod] = useState<FinancialRatioPeriod>("year");
+  const [ratioLoading, setRatioLoading] = useState(false);
   const [interval, setInterval] = useState<Interval>("1D");
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
@@ -431,10 +434,9 @@ export function SymbolDetailClient({
   useEffect(() => {
     let isCancelled = false;
     async function loadOverviewAndNews() {
-      const [overviewResult, newsResult, ratioResult] = await Promise.allSettled([
+      const [overviewResult, newsResult] = await Promise.allSettled([
         getCompanyOverview(symbol),
         getCompanyNews(symbol),
-        getFinancialRatioSummary(symbol),
       ]);
 
       if (isCancelled) {
@@ -452,9 +454,6 @@ export function SymbolDetailClient({
       } else {
         setNews([]);
       }
-
-      if (ratioResult.status === "fulfilled") setRatioSummary(ratioResult.value);
-      else setRatioSummary([]);
     }
 
     void loadOverviewAndNews();
@@ -462,6 +461,31 @@ export function SymbolDetailClient({
       isCancelled = true;
     };
   }, [symbol]);
+
+  useEffect(() => {
+    let isCancelled = false;
+    async function loadFinancialRatios() {
+      setRatioLoading(true);
+      try {
+        const data = await getFinancialRatioSummary(symbol, ratioPeriod);
+        if (!isCancelled) {
+          setRatioSummary(data);
+        }
+      } catch {
+        if (!isCancelled) {
+          setRatioSummary([]);
+        }
+      } finally {
+        if (!isCancelled) {
+          setRatioLoading(false);
+        }
+      }
+    }
+    void loadFinancialRatios();
+    return () => {
+      isCancelled = true;
+    };
+  }, [symbol, ratioPeriod]);
 
   useEffect(() => {
     let isCancelled = false;
@@ -691,9 +715,42 @@ export function SymbolDetailClient({
         </div>
       </section>
 
-      <section className="glass-panel rounded-xl p-6">
-        <h2 className="text-lg font-semibold text-slate-100">{UI_TEXT.symbol.financialRatioSummary}</h2>
-        <FinancialRatioCharts points={ratioSummary} />
+      <section className="glass-panel relative rounded-xl p-6">
+        <div className="absolute right-6 top-6 z-10 flex flex-wrap justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => setRatioPeriod("year")}
+            className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${
+              ratioPeriod === "year"
+                ? "bg-cyan-300/25 text-cyan-100"
+                : "border border-white/20 bg-slate-950/35 text-slate-200 hover:bg-white/10"
+            }`}
+          >
+            {UI_TEXT.symbol.financialRatioByYear}
+          </button>
+          <button
+            type="button"
+            onClick={() => setRatioPeriod("quarter")}
+            className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${
+              ratioPeriod === "quarter"
+                ? "bg-cyan-300/25 text-cyan-100"
+                : "border border-white/20 bg-slate-950/35 text-slate-200 hover:bg-white/10"
+            }`}
+          >
+            {UI_TEXT.symbol.financialRatioByQuarter}
+          </button>
+        </div>
+        <h2 className="max-w-[min(100%,calc(100%-11rem))] pr-2 text-lg font-semibold leading-snug text-slate-100">
+          {UI_TEXT.symbol.financialRatioSummary}
+        </h2>
+        {ratioLoading ? (
+          <div className="mt-4 space-y-3">
+            <p className="text-sm text-slate-400">{UI_TEXT.symbol.financialRatioLoading}</p>
+            <Skeleton className="h-40 w-full max-w-md" />
+          </div>
+        ) : (
+          <FinancialRatioCharts points={ratioSummary} periodMode={ratioPeriod} />
+        )}
       </section>
 
       <section className="glass-panel rounded-xl p-6">

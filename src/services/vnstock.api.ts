@@ -6,6 +6,7 @@ import type {
   CandlePoint,
   CompanyNewsItem,
   CompanyOverview,
+  FinancialRatioPeriod,
   FinancialRatioPoint,
   MarketScannerItem,
   MarketScannerResult,
@@ -434,11 +435,14 @@ export async function getCompanyNews(symbol: string): Promise<CompanyNewsItem[]>
   }
 }
 
-export async function getFinancialRatioSummary(symbol: string): Promise<FinancialRatioPoint[]> {
+export async function getFinancialRatioSummary(
+  symbol: string,
+  period: FinancialRatioPeriod = "year",
+): Promise<FinancialRatioPoint[]> {
   try {
     const response = await postWithRetryCache<Record<string, unknown>>(
       "/vnstock-api/financial/ratio",
-      { symbol, source: "VCI", period: "quarter", get_all: true, method_kwargs: {} },
+      { symbol, source: "VCI", period, get_all: true, method_kwargs: {} },
       { cacheTtlMs: 15000, retries: 3, retryDelayMs: 800 },
     );
 

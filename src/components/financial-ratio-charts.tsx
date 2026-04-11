@@ -8,10 +8,12 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import type { FinancialRatioPoint } from "@/types/vnstock";
+import { UI_TEXT } from "@/constants/ui-text";
+import type { FinancialRatioPeriod, FinancialRatioPoint } from "@/types/vnstock";
 
 interface FinancialRatioChartsProps {
   points: FinancialRatioPoint[];
+  periodMode?: FinancialRatioPeriod;
 }
 
 type MetricConfig = {
@@ -56,25 +58,29 @@ const METRICS: MetricConfig[] = [
   },
 ];
 
-function toQuarterLabel(point: FinancialRatioPoint): string {
+function toPeriodLabel(point: FinancialRatioPoint, mode: FinancialRatioPeriod): string {
   const year = Number(point["Meta,yearReport"] ?? 0);
   const quarter = Number(point["Meta,lengthReport"] ?? 0);
+  if (mode === "year") {
+    return year > 0 ? String(year) : String(point["Meta,yearReport"] ?? "");
+  }
   if (year > 0 && quarter > 0) {
     return `Q${quarter}/${year}`;
   }
-  return `${point["Meta,yearReport"] ?? ""}`;
+  return String(point["Meta,yearReport"] ?? "");
 }
 
-export function FinancialRatioCharts({ points }: FinancialRatioChartsProps) {
+export function FinancialRatioCharts({ points, periodMode = "year" }: FinancialRatioChartsProps) {
   if (points.length === 0) {
-    return (
-      <p className="mt-3 text-sm text-slate-400">No financial ratio summary data.</p>
-    );
+    return <p className="mt-3 text-sm text-slate-400">{UI_TEXT.symbol.financialRatioEmpty}</p>;
   }
 
   const sortedPoints = [...points].sort((a, b) => {
     const yearA = Number(a["Meta,yearReport"] ?? 0);
     const yearB = Number(b["Meta,yearReport"] ?? 0);
+    if (periodMode === "year") {
+      return yearA - yearB;
+    }
     const quarterA = Number(a["Meta,lengthReport"] ?? 0);
     const quarterB = Number(b["Meta,lengthReport"] ?? 0);
     if (yearA !== yearB) return yearA - yearB;
@@ -82,7 +88,7 @@ export function FinancialRatioCharts({ points }: FinancialRatioChartsProps) {
   });
 
   const chartData = sortedPoints.map((point) => ({
-    quarter: toQuarterLabel(point),
+    periodLabel: toPeriodLabel(point, periodMode),
     ...point,
   }));
 
@@ -100,7 +106,7 @@ export function FinancialRatioCharts({ points }: FinancialRatioChartsProps) {
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={chartData}>
                 <XAxis
-                  dataKey="quarter"
+                  dataKey="periodLabel"
                   tick={{ fill: "#94a3b8", fontSize: 10 }}
                   tickLine={false}
                   axisLine={false}

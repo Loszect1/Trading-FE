@@ -53,6 +53,8 @@ export interface CompanyNewsItem {
 
 export type FinancialRatioPoint = Record<string, string | number | null | undefined>;
 
+export type FinancialRatioPeriod = "quarter" | "year";
+
 export interface AiRiskItem {
   risk: string;
   probability: "Low" | "Medium" | "High" | string;
