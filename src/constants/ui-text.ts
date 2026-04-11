@@ -13,6 +13,23 @@ export const UI_TEXT = {
     openMarket: "Mở thị trường",
     openTrade: "Mở giao dịch",
     badge: "SÀN CHỨNG KHOÁN",
+    news: {
+      badge: "TIN TỨC",
+      title: "Tin tức",
+      description:
+        "Tổng hợp từ RSS và nguồn công khai (theo nhóm: trong nước, thế giới, mạng xã hội).",
+      filterAll: "Tất cả",
+      filterDomestic: "Trong nước",
+      filterWorld: "Thế giới",
+      filterSocial: "Mạng xã hội",
+      filtersAria: "Lọc danh mục tin",
+      refresh: "Làm mới",
+      refreshAria: "Làm mới tin, bỏ qua cache server",
+      refreshLoading: "Đang làm mới...",
+      loading: "Đang tải tin...",
+      empty: "Chưa có tin cho bộ lọc này.",
+      resultCount: (count: number) => `${count} bài`,
+    },
   },
   market: {
     title: "Danh sách mã cổ phiếu",

@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { HomeNewsSection } from "@/components/home-news-section";
 import { SiteNav } from "@/components/site-nav";
 import { UI_TEXT } from "@/constants/ui-text";
 
@@ -30,6 +31,7 @@ export default function Home() {
             </Link>
           </div>
         </section>
+        <HomeNewsSection />
       </main>
     </div>
   );
