@@ -3,8 +3,10 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { MarketTable } from "@/components/market-table";
+import { useToast } from "@/components/toast-provider";
 import { UI_TEXT } from "@/constants/ui-text";
-import { getMarketScannerTop } from "@/services/vnstock.api";
+import { getAllSymbols, getMarketScannerTop, getSymbolsByGroup } from "@/services/vnstock.api";
+import { isAppError } from "@/services/dnse.api";
 import type { MarketScannerResult, SymbolItem } from "@/types/vnstock";
 
 interface MarketClientProps {
@@ -13,17 +15,35 @@ interface MarketClientProps {
 
 type SortBy = "symbol-asc" | "symbol-desc";
 
+const BOARD_FILTERS = ["ALL", "VN30", "HOSE", "HNX", "UPCOM"] as const;
+type BoardFilter = (typeof BOARD_FILTERS)[number];
+
+function dedupeSymbolItems(items: SymbolItem[]): SymbolItem[] {
+  return Array.from(
+    new Map(
+      items
+        .filter((item) => item.symbol && item.symbol.trim().length > 0)
+        .map((item) => [item.symbol.toUpperCase(), { ...item, symbol: item.symbol.toUpperCase() }]),
+    ).values(),
+  );
+}
+
 export function MarketClient({ initialSymbols }: MarketClientProps) {
+  const { showToast } = useToast();
+  const [symbols, setSymbols] = useState<SymbolItem[]>(() => dedupeSymbolItems(initialSymbols));
+  const [listRefreshing, setListRefreshing] = useState(false);
   const [inputValue, setInputValue] = useState("");
   const [keyword, setKeyword] = useState("");
-  const [exchange, setExchange] = useState("ALL");
+  const [exchange, setExchange] = useState<BoardFilter>("VN30");
+  const [vn30SymbolSet, setVn30SymbolSet] = useState<Set<string>>(() => new Set());
+  const [vn30LoadState, setVn30LoadState] = useState<"loading" | "ready" | "error">("loading");
   const [sortBy, setSortBy] = useState<SortBy>("symbol-asc");
   const [page, setPage] = useState(1);
   const [scanner, setScanner] = useState<MarketScannerResult | null>(null);
   const [scannerLoading, setScannerLoading] = useState(true);
   const [scannerDays, setScannerDays] = useState(90);
   const [scannerMode, setScannerMode] = useState<"normal" | "ai">("normal");
-  const pageSize = 20;
+  const pageSize = 50;
 
   function getRiskClassName(riskLevel: string): string {
     const normalized = riskLevel.trim().toLowerCase();
@@ -72,6 +92,10 @@ export function MarketClient({ initialSymbols }: MarketClientProps) {
   }, [scannerDays]);
 
   useEffect(() => {
+    setSymbols(dedupeSymbolItems(initialSymbols));
+  }, [initialSymbols]);
+
+  useEffect(() => {
     const timer = window.setTimeout(() => {
       setKeyword(inputValue);
       setPage(1);
@@ -82,24 +106,48 @@ export function MarketClient({ initialSymbols }: MarketClientProps) {
     };
   }, [inputValue]);
 
-  const exchanges = useMemo(() => {
-    const values = new Set(
-      initialSymbols.map((item) => item.exchange).filter((value): value is string => Boolean(value)),
-    );
-    return ["ALL", ...Array.from(values).sort()];
-  }, [initialSymbols]);
+  useEffect(() => {
+    let cancelled = false;
+    async function loadVn30Symbols() {
+      setVn30LoadState("loading");
+      try {
+        const symbols = await getSymbolsByGroup("VN30");
+        if (!cancelled) {
+          setVn30SymbolSet(new Set(symbols));
+          setVn30LoadState("ready");
+        }
+      } catch {
+        if (!cancelled) {
+          setVn30SymbolSet(new Set());
+          setVn30LoadState("error");
+        }
+      }
+    }
+    void loadVn30Symbols();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const filteredSymbols = useMemo(() => {
     const normalizedKeyword = keyword.trim().toUpperCase();
 
-    const filtered = initialSymbols.filter((item) => {
+    const filtered = symbols.filter((item) => {
       const matchKeyword =
         normalizedKeyword.length === 0 ||
         item.symbol.toUpperCase().includes(normalizedKeyword) ||
         item.industry?.toUpperCase().includes(normalizedKeyword);
 
-      const matchExchange = exchange === "ALL" || item.exchange === exchange;
-      return matchKeyword && matchExchange;
+      let matchBoard = true;
+      if (exchange === "ALL") {
+        matchBoard = true;
+      } else if (exchange === "VN30") {
+        matchBoard = vn30SymbolSet.has(item.symbol.toUpperCase());
+      } else {
+        const itemExchange = item.exchange?.toUpperCase() ?? "";
+        matchBoard = itemExchange === exchange;
+      }
+      return matchKeyword && matchBoard;
     });
 
     filtered.sort((a, b) => {
@@ -110,7 +158,25 @@ export function MarketClient({ initialSymbols }: MarketClientProps) {
     });
 
     return filtered;
-  }, [exchange, initialSymbols, keyword, sortBy]);
+  }, [exchange, symbols, keyword, sortBy, vn30SymbolSet]);
+
+  async function refreshSymbolListFromServer() {
+    setListRefreshing(true);
+    try {
+      const next = await getAllSymbols({ forceRefresh: true });
+      setSymbols(dedupeSymbolItems(next));
+      setPage(1);
+    } catch (error) {
+      const message = isAppError(error)
+        ? error.message
+        : error instanceof Error
+          ? error.message
+          : UI_TEXT.market.refreshFromServerFailed;
+      showToast(message, "error");
+    } finally {
+      setListRefreshing(false);
+    }
+  }
 
   const totalPages = Math.max(1, Math.ceil(filteredSymbols.length / pageSize));
   const pagedSymbols = useMemo(() => {
@@ -126,11 +192,11 @@ export function MarketClient({ initialSymbols }: MarketClientProps) {
     <section className="space-y-4">
       <div className="glass-panel rounded-xl p-4">
         <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-slate-100">Scanner Top thanh khoan dot bien bat thuong</h2>
+          <h2 className="text-sm font-semibold text-slate-100">{UI_TEXT.market.scanner.title}</h2>
           <div className="flex items-center gap-2">
             <div className="flex items-center gap-2">
               <label htmlFor="scanner-days" className="text-xs text-slate-300">
-                Days
+                {UI_TEXT.market.scanner.daysLabel}
               </label>
               <input
                 id="scanner-days"
@@ -153,9 +219,14 @@ export function MarketClient({ initialSymbols }: MarketClientProps) {
                 className="h-7 w-16 rounded-md border border-slate-500/40 bg-slate-950/75 px-2 text-xs text-slate-100 outline-none transition focus:border-cyan-300/70 focus:ring-2 focus:ring-cyan-400/25"
               />
             </div>
-            {scanner?.as_of ? <p className="text-xs text-slate-400">As of {scanner.as_of}</p> : null}
+            {scanner?.as_of ? (
+              <p className="text-xs text-slate-400">
+                {UI_TEXT.market.scanner.asOfPrefix} {scanner.as_of}
+              </p>
+            ) : null}
             <p className="text-xs text-slate-400">
-              Mode: {scannerMode === "ai" ? "AI" : "Normal"}
+              {UI_TEXT.market.scanner.modeLabel}{" "}
+              {scannerMode === "ai" ? UI_TEXT.market.scanner.modeAi : UI_TEXT.market.scanner.modeNormal}
             </p>
             <button
               type="button"
@@ -163,7 +234,7 @@ export function MarketClient({ initialSymbols }: MarketClientProps) {
               disabled={scannerLoading}
               className="rounded-md border border-cyan-300/45 bg-cyan-300/10 px-3 py-1 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-300/20 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {scannerLoading ? "Scanning..." : "Scan now"}
+              {scannerLoading ? UI_TEXT.market.scanner.scanning : UI_TEXT.market.scanner.scanNow}
             </button>
             <button
               type="button"
@@ -171,12 +242,12 @@ export function MarketClient({ initialSymbols }: MarketClientProps) {
               disabled={scannerLoading}
               className="rounded-md border border-purple-300/45 bg-purple-300/10 px-3 py-1 text-xs font-semibold text-purple-100 transition hover:bg-purple-300/20 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {scannerLoading ? "Scanning..." : "Scan with AI"}
+              {scannerLoading ? UI_TEXT.market.scanner.scanning : UI_TEXT.market.scanner.scanWithAi}
             </button>
           </div>
         </div>
         {scannerLoading ? (
-          <p className="text-xs text-slate-400">Scanning market...</p>
+          <p className="text-xs text-slate-400">{UI_TEXT.market.scanner.scanningMarket}</p>
         ) : (
           <div className="grid gap-3 md:grid-cols-3">
             {(["HOSE", "HNX", "UPCOM"] as const).map((exchange) => (
@@ -201,29 +272,41 @@ export function MarketClient({ initialSymbols }: MarketClientProps) {
                               scanner.ai_risk_by_exchange[exchange][item.symbol],
                             )}`}
                           >
-                            Risk: {scanner.ai_risk_by_exchange[exchange][item.symbol]}
+                            {UI_TEXT.market.scanner.riskPrefix} {scanner.ai_risk_by_exchange[exchange][item.symbol]}
                           </p>
                         ) : null}
                         <p className="text-slate-400">
-                          Spike ratio: {(item.volume_spike_ratio ?? 0).toFixed(2)}x | Latest Vol:{" "}
-                          {(item.latest_volume ?? 0).toLocaleString("en-US")} | Base Vol:{" "}
-                          {(item.baseline_avg_volume ?? 0).toLocaleString("en-US")}
+                          {UI_TEXT.market.scanner.spikeLine(
+                            (item.volume_spike_ratio ?? 0).toFixed(2),
+                            (item.latest_volume ?? 0).toLocaleString("vi-VN"),
+                            (item.baseline_avg_volume ?? 0).toLocaleString("vi-VN"),
+                          )}
                         </p>
                       </div>
                     ))}
                     {scanner?.ai_reasoning_by_exchange?.[exchange] ? (
                       <p className="pt-1 text-[11px] text-slate-400">
-                        AI note: {scanner.ai_reasoning_by_exchange[exchange]}
+                        {UI_TEXT.market.scanner.aiNotePrefix} {scanner.ai_reasoning_by_exchange[exchange]}
                       </p>
                     ) : null}
                   </div>
                 ) : (
-                  <p className="mt-2 text-xs text-slate-400">No data</p>
+                  <p className="mt-2 text-xs text-slate-400">{UI_TEXT.market.scanner.noData}</p>
                 )}
               </div>
             ))}
           </div>
         )}
+      </div>
+      <div className="flex flex-wrap items-center justify-end">
+        <button
+          type="button"
+          onClick={() => void refreshSymbolListFromServer()}
+          disabled={listRefreshing}
+          className="rounded-md border border-cyan-300/45 bg-cyan-300/10 px-3 py-2 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-300/20 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {listRefreshing ? UI_TEXT.market.refreshFromServerLoading : UI_TEXT.market.refreshFromServer}
+        </button>
       </div>
       <div className="glass-panel grid gap-3 rounded-xl p-4 sm:grid-cols-3">
         <input
@@ -235,14 +318,14 @@ export function MarketClient({ initialSymbols }: MarketClientProps) {
         <select
           value={exchange}
           onChange={(event) => {
-            setExchange(event.target.value);
+            setExchange(event.target.value as BoardFilter);
             setPage(1);
           }}
           className="h-10 rounded-md border border-slate-500/40 bg-slate-950/75 px-3 text-sm text-slate-100 outline-none transition focus:border-cyan-300/70 focus:ring-2 focus:ring-cyan-400/25"
         >
-          {exchanges.map((item) => (
+          {BOARD_FILTERS.map((item) => (
             <option key={item} value={item}>
-              {item}
+              {item === "ALL" ? UI_TEXT.market.exchangeAll : item}
             </option>
           ))}
         </select>
@@ -258,6 +341,12 @@ export function MarketClient({ initialSymbols }: MarketClientProps) {
           <option value="symbol-desc">{UI_TEXT.market.sortZa}</option>
         </select>
       </div>
+      {exchange === "VN30" && vn30LoadState === "loading" ? (
+        <p className="text-xs text-slate-400">{UI_TEXT.market.vn30ListLoading}</p>
+      ) : null}
+      {exchange === "VN30" && vn30LoadState === "error" ? (
+        <p className="text-xs text-amber-200/90">{UI_TEXT.market.vn30ListError}</p>
+      ) : null}
       <div className="flex items-center justify-between text-xs text-slate-300">
         <p>{UI_TEXT.market.result(filteredSymbols.length)}</p>
         <p>{UI_TEXT.market.showing(from, to)}</p>

@@ -38,7 +38,6 @@ export default async function MarketPage() {
       <SiteNav />
       <main className="mx-auto w-full max-w-6xl px-4 py-8">
         <h1 className="text-2xl font-semibold text-slate-100">{UI_TEXT.market.title}</h1>
-        <p className="mt-2 font-mono text-sm text-slate-400">{UI_TEXT.market.source}</p>
         {errorMessage ? (
           <p className="mt-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
             {errorMessage}

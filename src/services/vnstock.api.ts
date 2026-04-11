@@ -28,21 +28,176 @@ function pickObject<T>(value: unknown): T | null {
   return null;
 }
 
-export async function getAllSymbols(): Promise<SymbolItem[]> {
+/** Bảng listing từ BE: `{ success, data: [...] }` hoặc mảng trực tiếp. */
+function extractListingTableRows(response: unknown): Record<string, unknown>[] {
+  if (!response || typeof response !== "object") {
+    return [];
+  }
+  const record = response as Record<string, unknown>;
+  const payload = record.data !== undefined ? record.data : response;
+  return pickArray<Record<string, unknown>>(payload);
+}
+
+function resolveExchangeField(item: Record<string, unknown>): string | undefined {
+  const candidates = [item.exchange, item.board, item.com_group_code, item.comGroupCode];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate.trim().toUpperCase();
+    }
+  }
+  return undefined;
+}
+
+function resolveIndustryField(item: Record<string, unknown>): string | undefined {
+  const candidates = [
+    item.industry_name,
+    item.industryName,
+    item.icb_name4,
+    item.icbName4,
+    item.industry,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate.trim();
+    }
+  }
+  return undefined;
+}
+
+function isLikelyStockListingRow(item: Record<string, unknown>): boolean {
+  const typeValue = item.type;
+  if (typeValue === undefined || typeValue === null) {
+    return true;
+  }
+  const normalized = String(typeValue).trim().toUpperCase();
+  if (normalized.length === 0) {
+    return true;
+  }
+  return normalized === "STOCK";
+}
+
+/**
+ * Danh sách mã có sàn + ngành: KBS `all_symbols` không trả exchange/industry,
+ * nên gọi `symbols-by-exchange` và `symbols-by-industries` rồi ghép theo mã.
+ */
+export async function getAllSymbols(options?: { forceRefresh?: boolean }): Promise<SymbolItem[]> {
+  const forceRefresh = options?.forceRefresh ?? false;
+  const listingPayload = {
+    source: "KBS",
+    random_agent: false,
+    show_log: false,
+    force_refresh: forceRefresh,
+  };
+  const cacheOpts = {
+    cacheTtlMs: 300_000,
+    retries: 2,
+    retryDelayMs: 800,
+    timeoutMs: 60_000,
+    skipCache: forceRefresh,
+  };
+
+  const [exchangeResult, industryResult] = await Promise.allSettled([
+    postWithRetryCache<Record<string, unknown>>(
+      "/vnstock-api/listing/symbols-by-exchange",
+      { ...listingPayload, method_kwargs: {} },
+      cacheOpts,
+    ),
+    postWithRetryCache<Record<string, unknown>>(
+      "/vnstock-api/listing/symbols-by-industries",
+      { ...listingPayload, method_kwargs: { lang: "vi" } },
+      cacheOpts,
+    ),
+  ]);
+
+  if (exchangeResult.status === "rejected") {
+    throw normalizeError(exchangeResult.reason);
+  }
+
+  const exchangeRows = extractListingTableRows(exchangeResult.value);
+  const industryBySymbol = new Map<string, string>();
+  if (industryResult.status === "fulfilled") {
+    const industryRows = extractListingTableRows(industryResult.value);
+    for (const row of industryRows) {
+      const symbol = String(row.symbol ?? row.code ?? "")
+        .trim()
+        .toUpperCase();
+      if (!symbol) {
+        continue;
+      }
+      const industry = resolveIndustryField(row);
+      if (industry && !industryBySymbol.has(symbol)) {
+        industryBySymbol.set(symbol, industry);
+      }
+    }
+  }
+
+  const merged: SymbolItem[] = [];
+  const seen = new Set<string>();
+
+  for (const item of exchangeRows) {
+    if (!isLikelyStockListingRow(item)) {
+      continue;
+    }
+    const symbol = String(item.symbol ?? item.code ?? "")
+      .trim()
+      .toUpperCase();
+    if (!symbol || seen.has(symbol)) {
+      continue;
+    }
+    seen.add(symbol);
+    merged.push({
+      symbol,
+      exchange: resolveExchangeField(item),
+      industry: industryBySymbol.get(symbol),
+    });
+  }
+
+  merged.sort((a, b) => a.symbol.localeCompare(b.symbol));
+  return merged;
+}
+
+function parseSymbolsGroupPayload(payload: unknown): string[] {
+  const out: string[] = [];
+  if (payload == null) {
+    return out;
+  }
+
+  if (Array.isArray(payload)) {
+    for (const element of payload) {
+      if (typeof element === "string" && element.trim().length > 0) {
+        out.push(element.trim().toUpperCase());
+      } else if (element && typeof element === "object" && !Array.isArray(element)) {
+        const record = element as Record<string, unknown>;
+        const sym = record.symbol ?? record.code;
+        if (typeof sym === "string" && sym.trim().length > 0) {
+          out.push(sym.trim().toUpperCase());
+        }
+      }
+    }
+    return out;
+  }
+
+  if (typeof payload === "object" && !Array.isArray(payload)) {
+    for (const value of Object.values(payload as Record<string, unknown>)) {
+      if (typeof value === "string" && value.trim().length > 0) {
+        out.push(value.trim().toUpperCase());
+      }
+    }
+  }
+
+  return out;
+}
+
+/** Danh sách mã theo nhóm KBS (VN30, HOSE, HNX, UPCOM, …). */
+export async function getSymbolsByGroup(group: string): Promise<string[]> {
   try {
     const response = await postWithRetryCache<Record<string, unknown>>(
-      "/vnstock-api/listing/all-symbols",
-      {},
-      { cacheTtlMs: 30000, retries: 1 },
+      "/vnstock-api/listing/symbols-by-group",
+      { method_kwargs: { group } },
+      { cacheTtlMs: 86_400_000, retries: 2, retryDelayMs: 800, timeoutMs: 20_000 },
     );
-    const raw = response?.data ?? response;
-    const list = pickArray<Record<string, unknown>>(raw);
-
-    return list.map((item) => ({
-      symbol: String(item.symbol ?? item.code ?? ""),
-      exchange: typeof item.exchange === "string" ? item.exchange : undefined,
-      industry: typeof item.industry === "string" ? item.industry : undefined,
-    }));
+    const payload = response?.data ?? response;
+    return parseSymbolsGroupPayload(payload);
   } catch (error) {
     throw normalizeError(error);
   }

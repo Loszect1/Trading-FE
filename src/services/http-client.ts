@@ -17,6 +17,8 @@ interface RetryCacheOptions {
   retryDelayMs?: number;
   cacheTtlMs?: number;
   timeoutMs?: number;
+  /** Bỏ qua đọc/ghi cache in-memory (ví dụ làm mới có chủ đích). */
+  skipCache?: boolean;
 }
 
 interface CacheEntry {
@@ -57,12 +59,15 @@ export async function postWithRetryCache<TResponse>(
   const retryDelayMs = options?.retryDelayMs ?? 500;
   const cacheTtlMs = options?.cacheTtlMs ?? 10000;
   const timeoutMs = options?.timeoutMs;
+  const skipCache = options?.skipCache ?? false;
   const cacheKey = buildCacheKey(path, payload);
   const now = Date.now();
 
-  const cached = responseCache.get(cacheKey);
-  if (cached && cached.expiresAt > now) {
-    return cached.data as TResponse;
+  if (!skipCache) {
+    const cached = responseCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      return cached.data as TResponse;
+    }
   }
 
   let attempt = 0;
@@ -71,10 +76,12 @@ export async function postWithRetryCache<TResponse>(
       const response = await httpClient.post<TResponse>(path, payload, {
         timeout: timeoutMs,
       });
-      responseCache.set(cacheKey, {
-        expiresAt: Date.now() + cacheTtlMs,
-        data: response.data,
-      });
+      if (!skipCache) {
+        responseCache.set(cacheKey, {
+          expiresAt: Date.now() + cacheTtlMs,
+          data: response.data,
+        });
+      }
       return response.data;
     } catch (error) {
       if (attempt >= retries || !shouldRetry(error)) {
@@ -96,12 +103,15 @@ export async function getWithRetryCache<TResponse>(
   const retryDelayMs = options?.retryDelayMs ?? 500;
   const cacheTtlMs = options?.cacheTtlMs ?? 10000;
   const timeoutMs = options?.timeoutMs;
+  const skipCache = options?.skipCache ?? false;
   const cacheKey = buildCacheKey(path, null);
   const now = Date.now();
 
-  const cached = responseCache.get(cacheKey);
-  if (cached && cached.expiresAt > now) {
-    return cached.data as TResponse;
+  if (!skipCache) {
+    const cached = responseCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      return cached.data as TResponse;
+    }
   }
 
   let attempt = 0;
@@ -110,10 +120,12 @@ export async function getWithRetryCache<TResponse>(
       const response = await httpClient.get<TResponse>(path, {
         timeout: timeoutMs,
       });
-      responseCache.set(cacheKey, {
-        expiresAt: Date.now() + cacheTtlMs,
-        data: response.data,
-      });
+      if (!skipCache) {
+        responseCache.set(cacheKey, {
+          expiresAt: Date.now() + cacheTtlMs,
+          data: response.data,
+        });
+      }
       return response.data;
     } catch (error) {
       if (attempt >= retries || !shouldRetry(error)) {

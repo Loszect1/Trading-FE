@@ -115,10 +115,9 @@ export function PriceChart({ data }: PriceChartProps) {
 
   return (
     <div className="glass-panel h-[340px] rounded-xl p-4 sm:p-5">
-      <div className="mb-3 flex items-center justify-between">
-        <p className="text-xs font-semibold tracking-wide text-slate-300">Price Chart</p>
+      <div className="mb-3 flex items-center justify-end">
         <p className={`text-xs font-semibold ${trendUp ? "text-emerald-300" : "text-rose-300"}`}>
-          {trendUp ? "Uptrend" : "Downtrend"}
+          {trendUp ? UI_TEXT.chart.uptrend : UI_TEXT.chart.downtrend}
         </p>
       </div>
       <div className="relative h-[280px] w-full">
@@ -200,7 +199,7 @@ export function PriceChart({ data }: PriceChartProps) {
             fontSize="10"
             fill="#94a3b8"
           >
-            VOL
+            {UI_TEXT.chart.volumeAxis}
           </text>
           <text
             x={chart!.margin.left - 10}
@@ -216,11 +215,21 @@ export function PriceChart({ data }: PriceChartProps) {
         {activeCandle ? (
           <div className="pointer-events-none absolute left-2 top-2 rounded-lg border border-slate-400/35 bg-slate-950/95 px-3 py-2 text-xs text-slate-100 shadow-xl">
             <p className="mb-1 font-semibold text-slate-200">{String(activeCandle.item.time).slice(0, 10)}</p>
-            <p>O: {activeCandle.item.open}</p>
-            <p>H: {activeCandle.item.high}</p>
-            <p>L: {activeCandle.item.low}</p>
-            <p>C: {activeCandle.item.close}</p>
-            <p>V: {activeCandle.item.volume.toLocaleString("vi-VN")}</p>
+            <p>
+              {UI_TEXT.chart.open}: {activeCandle.item.open}
+            </p>
+            <p>
+              {UI_TEXT.chart.high}: {activeCandle.item.high}
+            </p>
+            <p>
+              {UI_TEXT.chart.low}: {activeCandle.item.low}
+            </p>
+            <p>
+              {UI_TEXT.chart.close}: {activeCandle.item.close}
+            </p>
+            <p>
+              {UI_TEXT.chart.volume}: {activeCandle.item.volume.toLocaleString("vi-VN")}
+            </p>
           </div>
         ) : null}
       </div>

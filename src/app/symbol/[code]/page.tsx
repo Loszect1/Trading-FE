@@ -23,7 +23,7 @@ async function loadSymbolData(symbol: string) {
   let errorMessage = "";
   if (overviewResult.status === "rejected" && chartResult.status === "rejected") {
     const overviewError = overviewResult.reason as AppError;
-    errorMessage = overviewError?.message || "Load symbol detail failed";
+    errorMessage = overviewError?.message || UI_TEXT.symbol.loadFailed;
   }
 
   return { overview, chartData, errorMessage };
@@ -41,16 +41,10 @@ export default async function SymbolDetailPage({ params }: SymbolDetailPageProps
         <section className="glass-panel rounded-xl p-5">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <p className="font-mono text-xs tracking-[0.14em] text-cyan-200/80">SYMBOL OVERVIEW</p>
+              <p className="font-mono text-xs tracking-[0.14em] text-cyan-200/80">{UI_TEXT.symbol.overviewBadge}</p>
               <h1 className="mt-2 font-mono text-3xl font-semibold text-slate-100">{symbol}</h1>
             </div>
             <div className="flex flex-wrap gap-2">
-              <Link
-                href={`/trade?symbol=${encodeURIComponent(symbol)}`}
-                className="rounded-md border border-cyan-300/40 bg-cyan-300/15 px-4 py-2 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-300/25"
-              >
-                {UI_TEXT.symbol.openTrade}
-              </Link>
               <Link
                 href={`/trade?symbol=${encodeURIComponent(symbol)}&dnse=1`}
                 className="rounded-md border border-emerald-300/40 bg-emerald-400/15 px-4 py-2 text-sm font-semibold text-emerald-100 transition hover:bg-emerald-400/25"

@@ -9,7 +9,7 @@ export default function Home() {
       <main className="mx-auto flex w-full max-w-6xl flex-col gap-8 px-4 py-10">
         <section className="glass-panel rounded-2xl p-8">
           <p className="inline-flex rounded-full border border-cyan-300/35 bg-cyan-300/10 px-3 py-1 text-xs font-medium tracking-[0.12em] text-cyan-100">
-            MARKET TERMINAL
+            {UI_TEXT.home.badge}
           </p>
           <h1 className="mt-4 text-4xl font-semibold text-slate-100">{UI_TEXT.home.title}</h1>
           <p className="mt-3 max-w-2xl text-sm leading-7 text-slate-300">
