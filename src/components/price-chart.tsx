@@ -9,6 +9,8 @@ import {
   HistogramSeries,
   LineSeries,
   LineStyle,
+  type MouseEventParams,
+  type Time,
 } from "lightweight-charts";
 import { UI_TEXT } from "@/constants/ui-text";
 import { candlePointsToLwRows } from "@/lib/chart-time";
@@ -26,6 +28,20 @@ interface PriceChartProps {
 
 type IndicatorKey = "sma20" | "sma50" | "bollinger" | "rsi" | "macd";
 
+interface HoverLegendState {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  sma20: number | null;
+  sma50: number | null;
+  bbUpper: number | null;
+  bbLower: number | null;
+  rsi: number | null;
+  macd: number | null;
+  signal: number | null;
+}
+
 function linePointsFromNullable(
   times: string[],
   values: (number | null)[],
@@ -40,6 +56,25 @@ function linePointsFromNullable(
   return out;
 }
 
+function formatLegendNumber(value: number): string {
+  return value.toLocaleString("vi-VN", { maximumFractionDigits: 2 });
+}
+
+function toTimeKey(time: Time | undefined): string | null {
+  if (!time) {
+    return null;
+  }
+  if (typeof time === "string") {
+    return time;
+  }
+  if (typeof time === "number") {
+    return new Date(time * 1000).toISOString().slice(0, 10);
+  }
+  const month = String(time.month).padStart(2, "0");
+  const day = String(time.day).padStart(2, "0");
+  return `${time.year}-${month}-${day}`;
+}
+
 export function PriceChart({ data }: PriceChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [indicators, setIndicators] = useState<Record<IndicatorKey, boolean>>({
@@ -49,6 +84,7 @@ export function PriceChart({ data }: PriceChartProps) {
     rsi: false,
     macd: false,
   });
+  const [hoverLegend, setHoverLegend] = useState<HoverLegendState | null>(null);
 
   const rows = useMemo(() => candlePointsToLwRows(data), [data]);
 
@@ -81,6 +117,30 @@ export function PriceChart({ data }: PriceChartProps) {
     const bbFull = bollingerBands(closes, 20, 2);
     const rsiFull = rsi(closes, 14);
     const macdFull = macd(closes, 12, 26, 9);
+    const timeToIndex = new Map<string, number>();
+    for (let i = 0; i < rows.length; i++) {
+      timeToIndex.set(rows[i]!.time, i);
+    }
+
+    function setLegendForIndex(index: number) {
+      const row = rows[index];
+      if (!row) {
+        return;
+      }
+      setHoverLegend({
+        open: row.open,
+        high: row.high,
+        low: row.low,
+        close: row.close,
+        sma20: sma20Full[index] ?? null,
+        sma50: sma50Full[index] ?? null,
+        bbUpper: bbFull.upper[index] ?? null,
+        bbLower: bbFull.lower[index] ?? null,
+        rsi: rsiFull[index] ?? null,
+        macd: macdFull.line[index] ?? null,
+        signal: macdFull.signal[index] ?? null,
+      });
+    }
 
     const chart = createChart(el, {
       autoSize: true,
@@ -274,8 +334,24 @@ export function PriceChart({ data }: PriceChartProps) {
     }
 
     chart.timeScale().fitContent();
+    setLegendForIndex(rows.length - 1);
+
+    const onCrosshairMove = (param: MouseEventParams<Time>) => {
+      const timeKey = toTimeKey(param.time);
+      if (!timeKey) {
+        setLegendForIndex(rows.length - 1);
+        return;
+      }
+      const index = timeToIndex.get(timeKey);
+      if (index === undefined) {
+        return;
+      }
+      setLegendForIndex(index);
+    };
+    chart.subscribeCrosshairMove(onCrosshairMove);
 
     return () => {
+      chart.unsubscribeCrosshairMove(onCrosshairMove);
       chart.remove();
     };
   }, [
@@ -374,10 +450,64 @@ export function PriceChart({ data }: PriceChartProps) {
       </div>
 
       <div
-        ref={containerRef}
         className="relative w-full min-h-[440px] h-[min(72vh,620px)] rounded-xl border border-white/10 bg-slate-950/40"
         role="presentation"
-      />
+      >
+        <div ref={containerRef} className="h-full w-full" />
+        {hoverLegend ? (
+          <div className="pointer-events-none absolute left-2 top-2 rounded-md border border-white/10 bg-slate-950/70 px-2 py-1 text-[10px] text-slate-200 backdrop-blur">
+            <div className="flex flex-wrap gap-x-2 gap-y-0.5">
+              <span>
+                {UI_TEXT.chart.open}: {formatLegendNumber(hoverLegend.open)}
+              </span>
+              <span>
+                {UI_TEXT.chart.high}: {formatLegendNumber(hoverLegend.high)}
+              </span>
+              <span>
+                {UI_TEXT.chart.low}: {formatLegendNumber(hoverLegend.low)}
+              </span>
+              <span>
+                {UI_TEXT.chart.close}: {formatLegendNumber(hoverLegend.close)}
+              </span>
+              {indicators.sma20 && hoverLegend.sma20 !== null ? (
+                <span>
+                  {UI_TEXT.chart.legendSma20}: {formatLegendNumber(hoverLegend.sma20)}
+                </span>
+              ) : null}
+              {indicators.sma50 && hoverLegend.sma50 !== null ? (
+                <span>
+                  {UI_TEXT.chart.legendSma50}: {formatLegendNumber(hoverLegend.sma50)}
+                </span>
+              ) : null}
+              {indicators.bollinger && hoverLegend.bbUpper !== null ? (
+                <span>
+                  {UI_TEXT.chart.legendBbUpper}: {formatLegendNumber(hoverLegend.bbUpper)}
+                </span>
+              ) : null}
+              {indicators.bollinger && hoverLegend.bbLower !== null ? (
+                <span>
+                  {UI_TEXT.chart.legendBbLower}: {formatLegendNumber(hoverLegend.bbLower)}
+                </span>
+              ) : null}
+              {indicators.rsi && hoverLegend.rsi !== null ? (
+                <span>
+                  {UI_TEXT.symbol.indicatorRsi}: {formatLegendNumber(hoverLegend.rsi)}
+                </span>
+              ) : null}
+              {indicators.macd && hoverLegend.macd !== null ? (
+                <span>
+                  {UI_TEXT.chart.legendMacd}: {formatLegendNumber(hoverLegend.macd)}
+                </span>
+              ) : null}
+              {indicators.macd && hoverLegend.signal !== null ? (
+                <span>
+                  {UI_TEXT.chart.legendSignal}: {formatLegendNumber(hoverLegend.signal)}
+                </span>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+      </div>
 
       <p className="mt-2 text-center text-[10px] leading-relaxed text-slate-500">
         {UI_TEXT.chart.tradingViewControls}
