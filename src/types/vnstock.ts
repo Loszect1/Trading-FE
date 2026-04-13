@@ -30,6 +30,9 @@ export interface CandlePoint {
   volume?: number;
 }
 
+/** Lookback window for price history API (independent of candle interval). */
+export type ChartHistoryRange = "3M" | "1Y" | "ALL";
+
 export interface TradeStats {
   symbol: string;
   total_volume?: number;

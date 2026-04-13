@@ -14,7 +14,7 @@ export const revalidate = 0;
 async function loadSymbolData(symbol: string) {
   const [overviewResult, chartResult] = await Promise.allSettled([
     getCompanyOverview(symbol),
-    getPriceHistory(symbol, "1D"),
+    getPriceHistory(symbol, "1D", "3M"),
   ]);
 
   const overview = overviewResult.status === "fulfilled" ? overviewResult.value : null;

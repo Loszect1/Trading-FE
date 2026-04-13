@@ -20,6 +20,7 @@ import type {
   AiDataCompleteness,
   AiStructuredAnalysis,
   CandlePoint,
+  ChartHistoryRange,
   CompanyNewsItem,
   CompanyOverview,
   FinancialRatioPeriod,
@@ -29,6 +30,18 @@ import type {
 type Interval = "1D" | "1W" | "1M" | "1Y";
 
 const intervals: Interval[] = ["1D", "1W", "1M", "1Y"];
+
+const chartRanges: ChartHistoryRange[] = ["3M", "1Y", "ALL"];
+
+function chartRangeLabel(range: ChartHistoryRange): string {
+  if (range === "3M") {
+    return UI_TEXT.symbol.chartRange3M;
+  }
+  if (range === "1Y") {
+    return UI_TEXT.symbol.chartRange1Y;
+  }
+  return UI_TEXT.symbol.chartRangeAll;
+}
 
 function normalizeHeading(value: string): string {
   return value
@@ -415,6 +428,7 @@ export function SymbolDetailClient({
   const [ratioPeriod, setRatioPeriod] = useState<FinancialRatioPeriod>("year");
   const [ratioLoading, setRatioLoading] = useState(false);
   const [interval, setInterval] = useState<Interval>("1D");
+  const [chartRange, setChartRange] = useState<ChartHistoryRange>("3M");
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [aiLoading, setAiLoading] = useState(false);
@@ -430,6 +444,10 @@ export function SymbolDetailClient({
   const didSkipInitialFetchRef = useRef(false);
   const [aiModalOpen, setAiModalOpen] = useState(false);
   const [shortModalOpen, setShortModalOpen] = useState(false);
+
+  useEffect(() => {
+    setChartData(initialChartData);
+  }, [symbol, initialChartData]);
 
   useEffect(() => {
     let isCancelled = false;
@@ -503,7 +521,9 @@ export function SymbolDetailClient({
         }
         setErrorMessage("");
 
-        const chartResult = await Promise.allSettled([getPriceHistory(symbol, interval)]);
+        const chartResult = await Promise.allSettled([
+          getPriceHistory(symbol, interval, chartRange),
+        ]);
 
         if (!isCancelled) {
           const nextChartData =
@@ -515,7 +535,10 @@ export function SymbolDetailClient({
           }
 
           if (source === "user") {
-            showToast(TOAST_MESSAGES.symbolChartUpdated(symbol, interval), "success");
+            showToast(
+              TOAST_MESSAGES.symbolChartUpdated(symbol, interval, chartRangeLabel(chartRange)),
+              "success",
+            );
           }
         }
       } catch (error) {
@@ -553,7 +576,7 @@ export function SymbolDetailClient({
       isCancelled = true;
       window.clearInterval(timer);
     };
-  }, [initialChartData.length, interval, showToast, symbol]);
+  }, [chartRange, initialChartData.length, interval, showToast, symbol]);
 
   return (
     <>
@@ -631,24 +654,51 @@ export function SymbolDetailClient({
               {shortAiLoading ? UI_TEXT.symbol.shortAiLoading : UI_TEXT.symbol.shortAiAnalyze}
             </button>
           </div>
-          <div className="flex gap-2">
-            {intervals.map((item) => (
-              <button
-                key={item}
-                type="button"
-                onClick={() => {
-                  loadSourceRef.current = "user";
-                  setInterval(item);
-                }}
-                className={`rounded-md px-3 py-1.5 text-xs font-medium ${
-                  interval === item
-                    ? "bg-cyan-300/25 text-cyan-100"
-                    : "border border-white/20 bg-slate-950/35 text-slate-200 hover:bg-white/10"
-                }`}
-              >
-                {item}
-              </button>
-            ))}
+          <div className="flex flex-col items-end gap-2 sm:flex-row sm:items-center">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                {UI_TEXT.symbol.chartDataRange}
+              </span>
+              {chartRanges.map((item) => (
+                <button
+                  key={item}
+                  type="button"
+                  onClick={() => {
+                    loadSourceRef.current = "user";
+                    setChartRange(item);
+                  }}
+                  className={`rounded-md px-3 py-1.5 text-xs font-medium ${
+                    chartRange === item
+                      ? "bg-emerald-400/20 text-emerald-100 ring-1 ring-emerald-400/35"
+                      : "border border-white/20 bg-slate-950/35 text-slate-200 hover:bg-white/10"
+                  }`}
+                >
+                  {chartRangeLabel(item)}
+                </button>
+              ))}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="hidden text-[10px] font-semibold uppercase tracking-wider text-slate-500 sm:inline">
+                {UI_TEXT.symbol.chartIntervalLabel}
+              </span>
+              {intervals.map((item) => (
+                <button
+                  key={item}
+                  type="button"
+                  onClick={() => {
+                    loadSourceRef.current = "user";
+                    setInterval(item);
+                  }}
+                  className={`rounded-md px-3 py-1.5 text-xs font-medium ${
+                    interval === item
+                      ? "bg-cyan-300/25 text-cyan-100"
+                      : "border border-white/20 bg-slate-950/35 text-slate-200 hover:bg-white/10"
+                  }`}
+                >
+                  {item}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 
@@ -663,7 +713,7 @@ export function SymbolDetailClient({
             {errorMessage}
           </p>
         ) : null}
-        <PriceChart data={chartData} />
+        <PriceChart key={`${symbol}-${chartRange}-${interval}`} data={chartData} />
       </section>
 
       <AiResultModal

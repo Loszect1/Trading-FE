@@ -4,6 +4,7 @@ import type {
   AiDataCompleteness,
   AiStructuredAnalysis,
   CandlePoint,
+  ChartHistoryRange,
   CompanyNewsItem,
   CompanyOverview,
   FinancialRatioPeriod,
@@ -273,11 +274,28 @@ export async function getCompanyOverview(symbol: string): Promise<CompanyOvervie
   }
 }
 
-export async function getPriceHistory(symbol: string, interval = "1D"): Promise<CandlePoint[]> {
+function chartRangeToStartDate(endDate: Date, range: ChartHistoryRange): Date {
+  const startDate = new Date(endDate);
+  if (range === "3M") {
+    startDate.setMonth(startDate.getMonth() - 3);
+    return startDate;
+  }
+  if (range === "1Y") {
+    startDate.setFullYear(startDate.getFullYear() - 1);
+    return startDate;
+  }
+  startDate.setFullYear(startDate.getFullYear() - 25);
+  return startDate;
+}
+
+export async function getPriceHistory(
+  symbol: string,
+  interval = "1D",
+  range: ChartHistoryRange = "3M",
+): Promise<CandlePoint[]> {
   const formatYmd = (date: Date): string => date.toISOString().slice(0, 10);
   const endDate = new Date();
-  const startDate = new Date(endDate);
-  startDate.setDate(endDate.getDate() - 90);
+  const startDate = chartRangeToStartDate(endDate, range);
 
   const payload = {
     symbol,
