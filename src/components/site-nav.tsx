@@ -6,6 +6,8 @@ const items = [
   { href: "/market", label: UI_TEXT.nav.market },
   { href: "/watchlist", label: UI_TEXT.nav.watchlist },
   { href: "/trade", label: UI_TEXT.nav.trade },
+  { href: "/auto-trading", label: UI_TEXT.nav.autoTrading },
+  { href: "/operations", label: UI_TEXT.nav.operations },
 ];
 
 export function SiteNav() {

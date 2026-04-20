@@ -337,6 +337,43 @@ export async function getPriceHistory(
   }
 }
 
+/** Last daily close vs previous trading day (for compact symbol rows). */
+export interface SymbolDailyQuoteSnapshot {
+  symbol: string;
+  lastPrice: number;
+  prevClose?: number;
+  changePercent?: number;
+}
+
+export async function getSymbolDailyQuoteSnapshot(symbol: string): Promise<SymbolDailyQuoteSnapshot | null> {
+  const normalized = symbol.trim().toUpperCase();
+  if (!normalized) {
+    return null;
+  }
+  try {
+    const history = await getPriceHistory(normalized, "1D", "3M");
+    if (history.length === 0) {
+      return null;
+    }
+    const last = history[history.length - 1];
+    const prev = history.length >= 2 ? history[history.length - 2] : undefined;
+    const lastPrice = last.close;
+    const prevClose = prev?.close;
+    let changePercent: number | undefined;
+    if (prevClose !== undefined && prevClose > 0) {
+      changePercent = ((lastPrice - prevClose) / prevClose) * 100;
+    }
+    return {
+      symbol: normalized,
+      lastPrice,
+      prevClose,
+      changePercent,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function pickNewsUrl(item: Record<string, unknown>, depth = 0): string | undefined {
   const candidates = [
     item.news_source_link,
@@ -410,13 +447,16 @@ function pickNewsPublishedAt(item: Record<string, unknown>): string | undefined 
 
 export async function getCompanyNews(symbol: string): Promise<CompanyNewsItem[]> {
   try {
-    const response = await postWithRetryCache<Record<string, unknown>>(
-      "/vnstock-api/company/news",
-      { symbol },
-      { cacheTtlMs: 15000, retries: 3, retryDelayMs: 800 },
+    const normalizedSymbol = symbol.trim().toUpperCase();
+    if (!normalizedSymbol) {
+      return [];
+    }
+    const response = await getWithRetryCache<Record<string, unknown>>(
+      `/news/symbol/${encodeURIComponent(normalizedSymbol)}?limit=30`,
+      { cacheTtlMs: 15000, retries: 2, retryDelayMs: 600 },
     );
-    const raw = response?.data ?? response;
-    const list = pickArray<Record<string, unknown>>(raw);
+    const payload = pickObject<Record<string, unknown>>(response);
+    const list = pickArray<Record<string, unknown>>(payload?.items);
 
     return list
       .map((item) => {

@@ -29,6 +29,12 @@ export default function Home() {
             >
               {UI_TEXT.home.openTrade}
             </Link>
+            <Link
+              href="/auto-trading"
+              className="rounded-md border border-white/20 px-4 py-2 text-sm font-semibold text-slate-100 transition hover:bg-white/8"
+            >
+              {UI_TEXT.home.openAutoTrading}
+            </Link>
           </div>
         </section>
         <HomeNewsSection />
