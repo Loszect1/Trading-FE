@@ -40,6 +40,7 @@ import {
   fetchSchedulerDemoSession,
   fetchShortTermAsyncJob,
   fetchSchedulerStateRows,
+  parseShortTermRunExchangeScope,
   fetchSchedulerStatus,
   fetchShortTermRuns,
   postShortTermRunCycle,
@@ -233,6 +234,7 @@ export function AutoTradingClient() {
   >([]);
   const [automationRuns, setAutomationRuns] = useState<ShortTermAutomationRunRow[]>([]);
   const [automationRunsError, setAutomationRunsError] = useState("");
+  const [automationLogScopeFilter, setAutomationLogScopeFilter] = useState<"ANY" | ShortTermExchangeScope>("ANY");
   const [manualCycleExchangeScope, setManualCycleExchangeScope] = useState<ShortTermExchangeScope>("ALL");
   const [manualCycleBusy, setManualCycleBusy] = useState(false);
   const [manualCycleError, setManualCycleError] = useState("");
@@ -319,12 +321,18 @@ export function AutoTradingClient() {
   const schedulerAccountMode: "REAL" | "DEMO" = accountTab === "real" ? "REAL" : "DEMO";
 
   const automationRunLogGroups = useMemo(() => {
-    const scopedRuns = automationRuns.filter((run) => {
+    const runsBySession = automationRuns.filter((run) => {
       if (schedulerAccountMode !== "DEMO") {
         return true;
       }
       const sid = String((run.detail?.demo_session_id as string | undefined) || "").trim();
       return sid.length > 0 && sid === demoSessionId;
+    });
+    const scopedRuns = runsBySession.filter((run) => {
+      if (automationLogScopeFilter === "ANY") {
+        return true;
+      }
+      return parseShortTermRunExchangeScope(run.detail) === automationLogScopeFilter;
     });
     const buckets = new Map<ShortTermRunLogScopeBucket, ShortTermAutomationRunRow[]>();
     for (const bucket of [...SHORT_TERM_RUN_LOG_SCOPE_ORDER, "OTHER" as const]) {
@@ -338,7 +346,7 @@ export function AutoTradingClient() {
     return orderedBuckets
       .map((bucket) => ({ bucket, runs: buckets.get(bucket) ?? [] }))
       .filter((g) => g.runs.length > 0);
-  }, [automationRuns, demoSessionId, schedulerAccountMode]);
+  }, [automationLogScopeFilter, automationRuns, demoSessionId, schedulerAccountMode]);
 
   const overviewDonutData = useMemo(
     () => [
@@ -641,7 +649,7 @@ export function AutoTradingClient() {
 
   const loadAutomationRuns = useCallback(async () => {
     try {
-      const rows = await fetchShortTermRuns(schedulerAccountMode, 10);
+      const rows = await fetchShortTermRuns(schedulerAccountMode, 50);
       setAutomationRuns(rows);
       setAutomationRunsError("");
     } catch (error) {
@@ -1619,6 +1627,21 @@ export function AutoTradingClient() {
             <div className="flex flex-wrap items-end justify-between gap-3">
               <p className="font-semibold text-slate-200">Auto Trading Backend Logs ({schedulerAccountMode})</p>
               <div className="flex flex-wrap items-center gap-2">
+                <label className="flex flex-col gap-1 text-[11px] text-slate-400" htmlFor="at-log-scope-filter">
+                  Log scope
+                  <select
+                    id="at-log-scope-filter"
+                    className="rounded-md border border-white/15 bg-black/30 px-2 py-1.5 font-mono text-xs text-slate-100"
+                    value={automationLogScopeFilter}
+                    onChange={(e) => setAutomationLogScopeFilter(e.target.value as "ANY" | ShortTermExchangeScope)}
+                  >
+                    <option value="ANY">ANY</option>
+                    <option value="ALL">ALL</option>
+                    <option value="HOSE">HOSE</option>
+                    <option value="HNX">HNX</option>
+                    <option value="UPCOM">UPCOM</option>
+                  </select>
+                </label>
                 <label className="flex flex-col gap-1 text-[11px] text-slate-400" htmlFor="at-manual-exchange-scope">
                   Exchange scope
                   <select
