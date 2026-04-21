@@ -1,4 +1,7 @@
+"use client";
+
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { UI_TEXT } from "@/constants/ui-text";
 
 const items = [
@@ -11,6 +14,15 @@ const items = [
 ];
 
 export function SiteNav() {
+  const pathname = usePathname();
+
+  const isActive = (href: string): boolean => {
+    if (href === "/") {
+      return pathname === "/";
+    }
+    return pathname === href || pathname.startsWith(`${href}/`);
+  };
+
   return (
     <header className="sticky top-0 z-40 border-b border-white/10 bg-[#04070d]/85 backdrop-blur">
       <div className="mx-auto flex h-14 w-full max-w-6xl items-center justify-between px-4">
@@ -22,7 +34,11 @@ export function SiteNav() {
             <Link
               key={item.href}
               href={item.href}
-              className="rounded-md px-2 py-1 font-medium transition hover:bg-cyan-300/10 hover:text-cyan-100"
+              className={`rounded-md border px-2 py-1 font-medium transition ${
+                isActive(item.href)
+                  ? "border-cyan-300/70 bg-cyan-300/20 text-cyan-100 shadow-[0_0_0_1px_rgba(103,232,249,0.3)]"
+                  : "border-transparent hover:border-cyan-300/20 hover:bg-cyan-300/10 hover:text-cyan-100"
+              }`}
             >
               {item.label}
             </Link>

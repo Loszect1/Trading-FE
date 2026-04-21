@@ -102,14 +102,30 @@ interface DemoPortfolioSnapshot {
 
 type OrderStatus = "NEW" | "SENT" | "ACK" | "FILLED" | "REJECTED" | "CANCELLED";
 
+const STATUS_COLOR_CLASS = {
+  order: {
+    FILLED: "text-emerald-300",
+    REJECTED: "text-rose-300",
+    CANCELLED: "text-rose-300",
+    ACK: "text-cyan-300",
+    SENT: "text-amber-300",
+    NEW: "text-slate-300",
+    DEFAULT: "text-slate-300",
+  },
+  automationRun: {
+    COMPLETED: "text-emerald-300",
+    DEFAULT: "text-rose-300",
+  },
+} as const;
+
 function statusClass(status: string): string {
-  const s = status.toUpperCase();
-  if (s === "FILLED") return "text-emerald-300";
-  if (s === "REJECTED" || s === "CANCELLED") return "text-rose-300";
-  if (s === "ACK") return "text-cyan-300";
-  if (s === "SENT") return "text-amber-300";
-  if (s === "NEW") return "text-slate-300";
-  return "text-slate-300";
+  const s = String(status || "").toUpperCase() as keyof typeof STATUS_COLOR_CLASS.order;
+  return STATUS_COLOR_CLASS.order[s] ?? STATUS_COLOR_CLASS.order.DEFAULT;
+}
+
+function automationRunStatusClass(status: string): string {
+  const s = String(status || "").toUpperCase() as keyof typeof STATUS_COLOR_CLASS.automationRun;
+  return STATUS_COLOR_CLASS.automationRun[s] ?? STATUS_COLOR_CLASS.automationRun.DEFAULT;
 }
 
 function formatVnd(n: number): string {
@@ -1048,10 +1064,10 @@ export function AutoTradingClient() {
         <button
           type="button"
           onClick={() => setAccountTab("real")}
-          className={`rounded-md px-4 py-2 text-sm font-semibold transition ${
+          className={`rounded-md border px-4 py-2 text-sm font-semibold transition ${
             accountTab === "real"
-              ? "bg-cyan-300/20 text-cyan-50"
-              : "text-slate-400 hover:bg-white/5 hover:text-slate-200"
+              ? "border-cyan-300/70 bg-cyan-300/25 text-cyan-50 shadow-[0_0_0_1px_rgba(103,232,249,0.35)]"
+              : "border-transparent text-slate-400 hover:border-white/10 hover:bg-white/5 hover:text-slate-200"
           }`}
         >
           {UI_TEXT.autoTrading.tabReal}
@@ -1059,10 +1075,10 @@ export function AutoTradingClient() {
         <button
           type="button"
           onClick={() => setAccountTab("demo")}
-          className={`rounded-md px-4 py-2 text-sm font-semibold transition ${
+          className={`rounded-md border px-4 py-2 text-sm font-semibold transition ${
             accountTab === "demo"
-              ? "bg-cyan-300/20 text-cyan-50"
-              : "text-slate-400 hover:bg-white/5 hover:text-slate-200"
+              ? "border-cyan-300/70 bg-cyan-300/25 text-cyan-50 shadow-[0_0_0_1px_rgba(103,232,249,0.35)]"
+              : "border-transparent text-slate-400 hover:border-white/10 hover:bg-white/5 hover:text-slate-200"
           }`}
         >
           {UI_TEXT.autoTrading.tabDemo}
@@ -1672,8 +1688,12 @@ export function AutoTradingClient() {
                     <div className="mt-1 space-y-1">
                       {group.runs.map((run) => (
                         <p key={run.id} className="font-mono">
-                          {formatDateTime(run.started_at)} | {run.run_status} | scan {run.scanned} | buy{" "}
-                          {run.buy_candidates} | exec {run.executed} | err {run.errors}
+                          <span className="text-cyan-200">{formatDateTime(run.started_at)}</span> |{" "}
+                          <span className={automationRunStatusClass(run.run_status)}>{run.run_status}</span> | scan{" "}
+                          <span className="text-violet-300">{run.scanned}</span> | buy{" "}
+                          <span className="text-amber-300">{run.buy_candidates}</span> | exec{" "}
+                          <span className="text-emerald-300">{run.executed}</span> | err{" "}
+                          <span className={run.errors > 0 ? "text-rose-300" : "text-slate-400"}>{run.errors}</span>
                         </p>
                       ))}
                     </div>
@@ -1691,8 +1711,9 @@ export function AutoTradingClient() {
             ) : (
               <div className="mt-3 space-y-3 text-xs text-slate-300">
                 <p>
-                  Query: <span className="font-mono">{mailSignalsToday.query}</span> | Mail: {mailSignalsToday.mail_count} |
-                  Generated: {formatDateTime(mailSignalsToday.generated_at)}
+                  Query: <span className="font-mono text-cyan-200">{mailSignalsToday.query}</span> | Mail:{" "}
+                  <span className="text-violet-300">{mailSignalsToday.mail_count}</span> | Generated:{" "}
+                  <span className="text-amber-300">{formatDateTime(mailSignalsToday.generated_at)}</span>
                 </p>
                 {mailSignalsToday.items.length === 0 ? (
                   <p className="text-slate-500">Khong co ma mua hop le tu mail hom nay.</p>
@@ -1712,11 +1733,11 @@ export function AutoTradingClient() {
                       <tbody>
                         {mailSignalsToday.items.map((item, idx) => (
                           <tr key={`${item.symbol}-${idx}`} className="border-b border-white/5 align-top">
-                            <td className="py-2 pr-3 font-mono">{item.symbol}</td>
-                            <td className="py-2 pr-3">{formatPrice(item.entry)}</td>
+                            <td className="py-2 pr-3 font-mono text-cyan-200">{item.symbol}</td>
+                            <td className="py-2 pr-3 text-slate-100">{formatPrice(item.entry)}</td>
                             <td className="py-2 pr-3 text-emerald-300">{formatPrice(item.take_profit)}</td>
                             <td className="py-2 pr-3 text-rose-300">{formatPrice(item.stop_loss)}</td>
-                            <td className="py-2 pr-3">{(Number(item.confidence || 0) * 100).toFixed(0)}%</td>
+                            <td className="py-2 pr-3 text-amber-300">{(Number(item.confidence || 0) * 100).toFixed(0)}%</td>
                             <td className="py-2">{item.reason || "-"}</td>
                           </tr>
                         ))}
@@ -1736,12 +1757,15 @@ export function AutoTradingClient() {
             ) : (
               <div className="mt-3 space-y-3 text-xs text-slate-300">
                 <p>
-                  Redis key: <span className="font-mono">{mailSignalEntryRun.redis_key}</span> | Source:{" "}
-                  <span className="font-mono">{mailSignalEntryRun.source_key}</span> | Account: {mailSignalEntryRun.account_mode}
+                  Redis key: <span className="font-mono text-cyan-200">{mailSignalEntryRun.redis_key}</span> | Source:{" "}
+                  <span className="font-mono text-violet-300">{mailSignalEntryRun.source_key}</span> | Account:{" "}
+                  <span className="text-amber-300">{mailSignalEntryRun.account_mode}</span>
                 </p>
                 <p>
-                  Ran at: {formatDateTime(mailSignalEntryRun.ran_at)} | Scanned: {mailSignalEntryRun.scanned} | Executed:{" "}
-                  {mailSignalEntryRun.executed.length} | Skipped: {mailSignalEntryRun.skipped.length}
+                  Ran at: <span className="text-cyan-200">{formatDateTime(mailSignalEntryRun.ran_at)}</span> | Scanned:{" "}
+                  <span className="text-violet-300">{mailSignalEntryRun.scanned}</span> | Executed:{" "}
+                  <span className="text-emerald-300">{mailSignalEntryRun.executed.length}</span> | Skipped:{" "}
+                  <span className="text-rose-300">{mailSignalEntryRun.skipped.length}</span>
                 </p>
                 {mailSignalEntryRun.executed.length === 0 ? (
                   <p className="text-slate-500">Chua co lenh nao duoc ban trong lan chay gan nhat.</p>
@@ -1759,9 +1783,9 @@ export function AutoTradingClient() {
                       <tbody>
                         {mailSignalEntryRun.executed.map((row, idx) => (
                           <tr key={`${row.symbol}-${idx}`} className="border-b border-white/5">
-                            <td className="py-2 pr-3 font-mono">{row.symbol}</td>
+                            <td className="py-2 pr-3 font-mono text-cyan-200">{row.symbol}</td>
                             <td className="py-2 pr-3">{Number(row.quantity || 0)}</td>
-                            <td className="py-2 pr-3">{row.status || "-"}</td>
+                            <td className={`py-2 pr-3 ${statusClass(String(row.status || "-"))}`}>{row.status || "-"}</td>
                             <td className="py-2 pr-3 font-mono">{row.order_id || "-"}</td>
                           </tr>
                         ))}
