@@ -37,7 +37,7 @@ import {
 } from "@/services/auto-trading.api";
 import {
   fetchMailSignalEntryRunLatest,
-  fetchMailSignalsToday,
+  fetchMailSignalsLatest,
   fetchSchedulerDemoSession,
   fetchShortTermAsyncJob,
   fetchSchedulerStateRows,
@@ -52,7 +52,7 @@ import {
   type ShortTermAutomationRunRow,
   type ShortTermAsyncJobStatus,
   type ShortTermExchangeScope,
-  type MailSignalsTodayData,
+  type MailSignalsData,
   type MailSignalEntryRunData,
   type ShortTermRunLogScopeBucket,
 } from "@/services/automation.api";
@@ -254,7 +254,7 @@ export function AutoTradingClient() {
   >([]);
   const [automationRuns, setAutomationRuns] = useState<ShortTermAutomationRunRow[]>([]);
   const [automationRunsError, setAutomationRunsError] = useState("");
-  const [mailSignalsToday, setMailSignalsToday] = useState<MailSignalsTodayData | null>(null);
+  const [mailSignals, setMailSignals] = useState<MailSignalsData | null>(null);
   const [mailSignalsError, setMailSignalsError] = useState("");
   const [mailSignalEntryRun, setMailSignalEntryRun] = useState<MailSignalEntryRunData | null>(null);
   const [mailSignalEntryRunError, setMailSignalEntryRunError] = useState("");
@@ -680,14 +680,14 @@ export function AutoTradingClient() {
     }
   }, [schedulerAccountMode]);
 
-  const loadMailSignalsToday = useCallback(async () => {
+  const loadMailSignals = useCallback(async () => {
     try {
-      const row = await fetchMailSignalsToday();
-      setMailSignalsToday(row);
+      const row = await fetchMailSignalsLatest();
+      setMailSignals(row);
       setMailSignalsError("");
     } catch (error) {
-      setMailSignalsToday(null);
-      setMailSignalsError(isAppError(error) ? error.message : "Khong tai duoc mail signals hom nay.");
+      setMailSignals(null);
+      setMailSignalsError(isAppError(error) ? error.message : "Khong tai duoc mail signals moi nhat.");
     }
   }, []);
 
@@ -733,9 +733,9 @@ export function AutoTradingClient() {
     void loadSchedulerStatus();
     void loadSchedulerStateRows();
     void loadAutomationRuns();
-    void loadMailSignalsToday();
+    void loadMailSignals();
     void loadMailSignalEntryRun();
-  }, [loadAutomationRuns, loadMailSignalEntryRun, loadMailSignalsToday, loadSchedulerStateRows, loadSchedulerStatus]);
+  }, [loadAutomationRuns, loadMailSignalEntryRun, loadMailSignals, loadSchedulerStateRows, loadSchedulerStatus]);
 
   useEffect(() => {
     // Match BE scan cadence: `interval_minutes` === `short_term_scan_interval_minutes` (not scheduler poll loop).
@@ -749,7 +749,7 @@ export function AutoTradingClient() {
       void loadSchedulerStatus();
       void loadSchedulerStateRows();
       void loadAutomationRuns();
-      void loadMailSignalsToday();
+      void loadMailSignals();
       void loadMailSignalEntryRun();
     };
 
@@ -758,7 +758,7 @@ export function AutoTradingClient() {
   }, [
     loadAutomationRuns,
     loadMailSignalEntryRun,
-    loadMailSignalsToday,
+    loadMailSignals,
     loadSchedulerStateRows,
     loadSchedulerStatus,
     schedulerAccountMode,
@@ -1704,34 +1704,29 @@ export function AutoTradingClient() {
           </div>
 
           <section className="glass-panel rounded-2xl p-6">
-            <h3 className="text-sm font-semibold text-slate-200">Mail Signals Today (Claude)</h3>
+            <h3 className="text-sm font-semibold text-slate-200">Mail Signals</h3>
             {mailSignalsError ? <p className="mt-2 text-xs text-rose-300">{mailSignalsError}</p> : null}
-            {!mailSignalsToday ? (
-              <p className="mt-3 text-xs text-slate-500">Chua co du lieu signal hom nay.</p>
+            {!mailSignals ? (
+              <p className="mt-3 text-xs text-slate-500">Chua co du lieu mail signal.</p>
             ) : (
               <div className="mt-3 space-y-3 text-xs text-slate-300">
-                <p>
-                  Query: <span className="font-mono text-cyan-200">{mailSignalsToday.query}</span> | Mail:{" "}
-                  <span className="text-violet-300">{mailSignalsToday.mail_count}</span> | Generated:{" "}
-                  <span className="text-amber-300">{formatDateTime(mailSignalsToday.generated_at)}</span>
-                </p>
-                {mailSignalsToday.items.length === 0 ? (
-                  <p className="text-slate-500">Khong co ma mua hop le tu mail hom nay.</p>
+                {mailSignals.items.length === 0 ? (
+                  <p className="text-slate-500">Khong co ma mua hop le tu mail gan nhat.</p>
                 ) : (
                   <div className="overflow-x-auto">
                     <table className="w-full min-w-[760px] text-left text-xs text-slate-200">
-                      <thead className="border-b border-white/10 uppercase text-slate-500">
+                      <thead className="border-b border-white/10 uppercase tracking-wide text-slate-500">
                         <tr>
-                          <th className="py-2 pr-3">Symbol</th>
-                          <th className="py-2 pr-3">Entry</th>
-                          <th className="py-2 pr-3">Take profit</th>
-                          <th className="py-2 pr-3">Stop loss</th>
-                          <th className="py-2 pr-3">Confidence</th>
-                          <th className="py-2">Reason</th>
+                          <th className="py-2.5 pr-4 whitespace-nowrap">Symbol</th>
+                          <th className="py-2.5 pr-4 whitespace-nowrap">Entry</th>
+                          <th className="py-2.5 pr-4 whitespace-nowrap">Take profit</th>
+                          <th className="py-2.5 pr-4 whitespace-nowrap">Stop loss</th>
+                          <th className="py-2.5 pr-4 whitespace-nowrap">Confidence</th>
+                          <th className="py-2.5 whitespace-nowrap">Reason</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {mailSignalsToday.items.map((item, idx) => (
+                        {mailSignals.items.map((item, idx) => (
                           <tr key={`${item.symbol}-${idx}`} className="border-b border-white/5 align-top">
                             <td className="py-2 pr-3 font-mono text-cyan-200">{item.symbol}</td>
                             <td className="py-2 pr-3 text-slate-100">{formatPrice(item.entry)}</td>
@@ -1756,11 +1751,6 @@ export function AutoTradingClient() {
               <p className="mt-3 text-xs text-slate-500">Chua co log entry scheduler.</p>
             ) : (
               <div className="mt-3 space-y-3 text-xs text-slate-300">
-                <p>
-                  Redis key: <span className="font-mono text-cyan-200">{mailSignalEntryRun.redis_key}</span> | Source:{" "}
-                  <span className="font-mono text-violet-300">{mailSignalEntryRun.source_key}</span> | Account:{" "}
-                  <span className="text-amber-300">{mailSignalEntryRun.account_mode}</span>
-                </p>
                 <p>
                   Ran at: <span className="text-cyan-200">{formatDateTime(mailSignalEntryRun.ran_at)}</span> | Scanned:{" "}
                   <span className="text-violet-300">{mailSignalEntryRun.scanned}</span> | Executed:{" "}

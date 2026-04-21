@@ -88,7 +88,8 @@ export interface MailSignalPick {
   reason: string;
 }
 
-export interface MailSignalsTodayData {
+export interface MailSignalsData {
+  redis_key?: string;
   success: boolean;
   query: string;
   mail_count: number;
@@ -203,10 +204,10 @@ export async function fetchShortTermAsyncJob(jobId: string): Promise<ShortTermAs
   }
 }
 
-export async function fetchMailSignalsToday(): Promise<MailSignalsTodayData | null> {
+export async function fetchMailSignalsLatest(): Promise<MailSignalsData | null> {
   try {
-    const response = await httpClient.get<{ success: boolean; data: MailSignalsTodayData | null }>(
-      "/automation/mail-signals/today",
+    const response = await httpClient.get<{ success: boolean; data: MailSignalsData | null }>(
+      "/automation/mail-signals/latest",
     );
     return response.data.data ?? null;
   } catch (error) {
