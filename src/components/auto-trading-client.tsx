@@ -37,6 +37,7 @@ import {
   type DemoSessionOverviewData,
 } from "@/services/auto-trading.api";
 import {
+  fetchMailSignalsToday,
   fetchSchedulerDemoSession,
   fetchShortTermAsyncJob,
   fetchSchedulerStateRows,
@@ -51,6 +52,7 @@ import {
   type ShortTermAutomationRunRow,
   type ShortTermAsyncJobStatus,
   type ShortTermExchangeScope,
+  type MailSignalsTodayData,
   type ShortTermRunLogScopeBucket,
 } from "@/services/automation.api";
 import {
@@ -234,6 +236,8 @@ export function AutoTradingClient() {
   >([]);
   const [automationRuns, setAutomationRuns] = useState<ShortTermAutomationRunRow[]>([]);
   const [automationRunsError, setAutomationRunsError] = useState("");
+  const [mailSignalsToday, setMailSignalsToday] = useState<MailSignalsTodayData | null>(null);
+  const [mailSignalsError, setMailSignalsError] = useState("");
   const [automationLogScopeFilter, setAutomationLogScopeFilter] = useState<"ANY" | ShortTermExchangeScope>("ANY");
   const [manualCycleExchangeScope, setManualCycleExchangeScope] = useState<ShortTermExchangeScope>("ALL");
   const [manualCycleBusy, setManualCycleBusy] = useState(false);
@@ -658,6 +662,17 @@ export function AutoTradingClient() {
     }
   }, [schedulerAccountMode]);
 
+  const loadMailSignalsToday = useCallback(async () => {
+    try {
+      const row = await fetchMailSignalsToday();
+      setMailSignalsToday(row);
+      setMailSignalsError("");
+    } catch (error) {
+      setMailSignalsToday(null);
+      setMailSignalsError(isAppError(error) ? error.message : "Khong tai duoc mail signals hom nay.");
+    }
+  }, []);
+
   useEffect(() => {
     const sessionId = getOrCreateDemoSessionId();
     setDemoSessionId(sessionId);
@@ -689,7 +704,8 @@ export function AutoTradingClient() {
     void loadSchedulerStatus();
     void loadSchedulerStateRows();
     void loadAutomationRuns();
-  }, [loadAutomationRuns, loadSchedulerStateRows, loadSchedulerStatus]);
+    void loadMailSignalsToday();
+  }, [loadAutomationRuns, loadMailSignalsToday, loadSchedulerStateRows, loadSchedulerStatus]);
 
   useEffect(() => {
     // Match BE scan cadence: `interval_minutes` === `short_term_scan_interval_minutes` (not scheduler poll loop).
@@ -703,12 +719,14 @@ export function AutoTradingClient() {
       void loadSchedulerStatus();
       void loadSchedulerStateRows();
       void loadAutomationRuns();
+      void loadMailSignalsToday();
     };
 
     const id = window.setInterval(tick, intervalMs);
     return () => window.clearInterval(id);
   }, [
     loadAutomationRuns,
+    loadMailSignalsToday,
     loadSchedulerStateRows,
     loadSchedulerStatus,
     schedulerAccountMode,
@@ -1704,6 +1722,51 @@ export function AutoTradingClient() {
               </div>
             )}
           </div>
+
+          <section className="glass-panel rounded-2xl p-6">
+            <h3 className="text-sm font-semibold text-slate-200">Mail Signals Today (Claude)</h3>
+            {mailSignalsError ? <p className="mt-2 text-xs text-rose-300">{mailSignalsError}</p> : null}
+            {!mailSignalsToday ? (
+              <p className="mt-3 text-xs text-slate-500">Chua co du lieu signal hom nay.</p>
+            ) : (
+              <div className="mt-3 space-y-3 text-xs text-slate-300">
+                <p>
+                  Query: <span className="font-mono">{mailSignalsToday.query}</span> | Mail: {mailSignalsToday.mail_count} |
+                  Generated: {formatDateTime(mailSignalsToday.generated_at)}
+                </p>
+                {mailSignalsToday.items.length === 0 ? (
+                  <p className="text-slate-500">Khong co ma mua hop le tu mail hom nay.</p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[760px] text-left text-xs text-slate-200">
+                      <thead className="border-b border-white/10 uppercase text-slate-500">
+                        <tr>
+                          <th className="py-2 pr-3">Symbol</th>
+                          <th className="py-2 pr-3">Entry</th>
+                          <th className="py-2 pr-3">Take profit</th>
+                          <th className="py-2 pr-3">Stop loss</th>
+                          <th className="py-2 pr-3">Confidence</th>
+                          <th className="py-2">Reason</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {mailSignalsToday.items.map((item, idx) => (
+                          <tr key={`${item.symbol}-${idx}`} className="border-b border-white/5 align-top">
+                            <td className="py-2 pr-3 font-mono">{item.symbol}</td>
+                            <td className="py-2 pr-3">{formatPrice(item.entry)}</td>
+                            <td className="py-2 pr-3 text-emerald-300">{formatPrice(item.take_profit)}</td>
+                            <td className="py-2 pr-3 text-rose-300">{formatPrice(item.stop_loss)}</td>
+                            <td className="py-2 pr-3">{(Number(item.confidence || 0) * 100).toFixed(0)}%</td>
+                            <td className="py-2">{item.reason || "-"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
 
           <section className="glass-panel rounded-2xl p-6">
             <h2 className="text-lg font-semibold text-slate-100">{UI_TEXT.autoTrading.demoTradeTitle}</h2>

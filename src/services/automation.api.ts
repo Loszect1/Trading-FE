@@ -79,6 +79,24 @@ export interface ShortTermAsyncJobStatus {
   limit_symbols: number;
 }
 
+export interface MailSignalPick {
+  symbol: string;
+  entry: number;
+  take_profit: number;
+  stop_loss: number;
+  confidence: number;
+  reason: string;
+}
+
+export interface MailSignalsTodayData {
+  success: boolean;
+  query: string;
+  mail_count: number;
+  items: MailSignalPick[];
+  generated_at: string;
+  source_message_ids: string[];
+}
+
 export async function fetchSchedulerStatus(accountMode: "REAL" | "DEMO"): Promise<SchedulerStatus> {
   try {
     const response = await httpClient.get<SchedulerStatus>(
@@ -164,6 +182,17 @@ export async function fetchShortTermAsyncJob(jobId: string): Promise<ShortTermAs
       `/automation/short-term/async-job/${encodeURIComponent(jobId)}`,
     );
     return response.data.data;
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function fetchMailSignalsToday(): Promise<MailSignalsTodayData | null> {
+  try {
+    const response = await httpClient.get<{ success: boolean; data: MailSignalsTodayData | null }>(
+      "/automation/mail-signals/today",
+    );
+    return response.data.data ?? null;
   } catch (error) {
     throw normalizeError(error);
   }
