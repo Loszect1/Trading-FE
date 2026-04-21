@@ -97,6 +97,22 @@ export interface MailSignalsTodayData {
   source_message_ids: string[];
 }
 
+export interface MailSignalEntryRunData {
+  redis_key: string;
+  success: boolean;
+  source_key: string;
+  account_mode: string;
+  scanned: number;
+  executed: Array<{
+    symbol: string;
+    order_id?: string | null;
+    status?: string | null;
+    quantity?: number;
+  }>;
+  skipped: Array<Record<string, unknown>>;
+  ran_at: string;
+}
+
 export async function fetchSchedulerStatus(accountMode: "REAL" | "DEMO"): Promise<SchedulerStatus> {
   try {
     const response = await httpClient.get<SchedulerStatus>(
@@ -191,6 +207,17 @@ export async function fetchMailSignalsToday(): Promise<MailSignalsTodayData | nu
   try {
     const response = await httpClient.get<{ success: boolean; data: MailSignalsTodayData | null }>(
       "/automation/mail-signals/today",
+    );
+    return response.data.data ?? null;
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function fetchMailSignalEntryRunLatest(): Promise<MailSignalEntryRunData | null> {
+  try {
+    const response = await httpClient.get<{ success: boolean; data: MailSignalEntryRunData | null }>(
+      "/automation/mail-signals/entry-run/latest",
     );
     return response.data.data ?? null;
   } catch (error) {

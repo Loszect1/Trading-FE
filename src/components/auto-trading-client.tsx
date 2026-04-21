@@ -29,7 +29,6 @@ import {
   pickSubAccountNumbers,
 } from "@/services/dnse.api";
 import {
-  createDemoTrade,
   fetchDemoOverview,
   createNewDemoSession,
   fetchDemoAccount,
@@ -37,6 +36,7 @@ import {
   type DemoSessionOverviewData,
 } from "@/services/auto-trading.api";
 import {
+  fetchMailSignalEntryRunLatest,
   fetchMailSignalsToday,
   fetchSchedulerDemoSession,
   fetchShortTermAsyncJob,
@@ -53,6 +53,7 @@ import {
   type ShortTermAsyncJobStatus,
   type ShortTermExchangeScope,
   type MailSignalsTodayData,
+  type MailSignalEntryRunData,
   type ShortTermRunLogScopeBucket,
 } from "@/services/automation.api";
 import {
@@ -68,6 +69,7 @@ import type { CompanyOverview, SymbolItem } from "@/types/vnstock";
 type AccountTab = "real" | "demo";
 
 const DEMO_INITIAL_CASH_VND = 100_000_000;
+const AUTO_TRADING_BACKEND_LOGS_PER_SCOPE = 5;
 
 interface SymbolSearchRow extends SymbolItem {
   lastPrice?: number;
@@ -238,6 +240,8 @@ export function AutoTradingClient() {
   const [automationRunsError, setAutomationRunsError] = useState("");
   const [mailSignalsToday, setMailSignalsToday] = useState<MailSignalsTodayData | null>(null);
   const [mailSignalsError, setMailSignalsError] = useState("");
+  const [mailSignalEntryRun, setMailSignalEntryRun] = useState<MailSignalEntryRunData | null>(null);
+  const [mailSignalEntryRunError, setMailSignalEntryRunError] = useState("");
   const [automationLogScopeFilter, setAutomationLogScopeFilter] = useState<"ANY" | ShortTermExchangeScope>("ANY");
   const [manualCycleExchangeScope, setManualCycleExchangeScope] = useState<ShortTermExchangeScope>("ALL");
   const [manualCycleBusy, setManualCycleBusy] = useState(false);
@@ -307,11 +311,6 @@ export function AutoTradingClient() {
   const [historyTotal, setHistoryTotal] = useState(0);
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
   const [demoSessionBusy, setDemoSessionBusy] = useState(false);
-  const [demoSymbol, setDemoSymbol] = useState("");
-  const [demoSide, setDemoSide] = useState<"buy" | "sell">("buy");
-  const [demoQty, setDemoQty] = useState("100");
-  const [demoPrice, setDemoPrice] = useState("");
-  const [demoBusy, setDemoBusy] = useState(false);
   const [demoLog, setDemoLog] = useState<string[]>([]);
   const [demoOverview, setDemoOverview] = useState<DemoSessionOverviewData | null>(null);
   const [demoOverviewError, setDemoOverviewError] = useState("");
@@ -348,7 +347,10 @@ export function AutoTradingClient() {
     }
     const orderedBuckets: ShortTermRunLogScopeBucket[] = [...SHORT_TERM_RUN_LOG_SCOPE_ORDER, "OTHER"];
     return orderedBuckets
-      .map((bucket) => ({ bucket, runs: buckets.get(bucket) ?? [] }))
+      .map((bucket) => ({
+        bucket,
+        runs: (buckets.get(bucket) ?? []).slice(0, AUTO_TRADING_BACKEND_LOGS_PER_SCOPE),
+      }))
       .filter((g) => g.runs.length > 0);
   }, [automationLogScopeFilter, automationRuns, demoSessionId, schedulerAccountMode]);
 
@@ -673,6 +675,17 @@ export function AutoTradingClient() {
     }
   }, []);
 
+  const loadMailSignalEntryRun = useCallback(async () => {
+    try {
+      const row = await fetchMailSignalEntryRunLatest();
+      setMailSignalEntryRun(row);
+      setMailSignalEntryRunError("");
+    } catch (error) {
+      setMailSignalEntryRun(null);
+      setMailSignalEntryRunError(isAppError(error) ? error.message : "Khong tai duoc entry scheduler log moi nhat.");
+    }
+  }, []);
+
   useEffect(() => {
     const sessionId = getOrCreateDemoSessionId();
     setDemoSessionId(sessionId);
@@ -705,7 +718,8 @@ export function AutoTradingClient() {
     void loadSchedulerStateRows();
     void loadAutomationRuns();
     void loadMailSignalsToday();
-  }, [loadAutomationRuns, loadMailSignalsToday, loadSchedulerStateRows, loadSchedulerStatus]);
+    void loadMailSignalEntryRun();
+  }, [loadAutomationRuns, loadMailSignalEntryRun, loadMailSignalsToday, loadSchedulerStateRows, loadSchedulerStatus]);
 
   useEffect(() => {
     // Match BE scan cadence: `interval_minutes` === `short_term_scan_interval_minutes` (not scheduler poll loop).
@@ -720,12 +734,14 @@ export function AutoTradingClient() {
       void loadSchedulerStateRows();
       void loadAutomationRuns();
       void loadMailSignalsToday();
+      void loadMailSignalEntryRun();
     };
 
     const id = window.setInterval(tick, intervalMs);
     return () => window.clearInterval(id);
   }, [
     loadAutomationRuns,
+    loadMailSignalEntryRun,
     loadMailSignalsToday,
     loadSchedulerStateRows,
     loadSchedulerStatus,
@@ -854,62 +870,6 @@ export function AutoTradingClient() {
     } catch (error) {
       const message = isAppError(error) ? error.message : "Process order that bai.";
       setRealOrderMessage(message);
-    }
-  };
-
-  const handleDemoSubmit = async (event: FormEvent) => {
-    event.preventDefault();
-    const sym = demoSymbol.trim().toUpperCase();
-    const qty = Number(demoQty);
-    const price = Number(demoPrice.replace(",", "."));
-    if (!sym || sym.length > 20) {
-      pushDemoLog(UI_TEXT.autoTrading.demoInvalidSymbol);
-      return;
-    }
-    if (!Number.isFinite(qty) || qty <= 0 || !Number.isInteger(qty)) {
-      pushDemoLog(UI_TEXT.autoTrading.demoInvalidQty);
-      return;
-    }
-    if (!Number.isFinite(price) || price <= 0) {
-      pushDemoLog(UI_TEXT.autoTrading.demoInvalidPrice);
-      return;
-    }
-
-    const notional = qty * price;
-    setDemoBusy(true);
-    try {
-      const tradeResult = await createDemoTrade(demoSessionId, {
-        side: demoSide.toUpperCase() as "BUY" | "SELL",
-        symbol: sym,
-        quantity: qty,
-        price,
-        strategy_type: "SHORT_TERM",
-        market_context: {
-          source: "fe_auto_trading_demo",
-          notional,
-        },
-      });
-
-      if (tradeResult.side === "BUY") {
-        pushDemoLog(UI_TEXT.autoTrading.demoBuyFilled(sym, qty, formatPrice(price), formatVnd(notional)));
-      } else {
-        pushDemoLog(UI_TEXT.autoTrading.demoSellFilled(sym, qty, formatPrice(price), formatVnd(notional)));
-      }
-      if (tradeResult.experience_analysis.recorded) {
-        pushDemoLog(UI_TEXT.autoTrading.demoLossAnalyzeOk);
-      } else if (tradeResult.experience_analysis.error_detail) {
-        pushDemoLog(`${UI_TEXT.autoTrading.demoLossAnalyzeFail}: ${tradeResult.experience_analysis.error_detail}`);
-      }
-
-      setDemoCash(tradeResult.cash_after);
-      setHistoryOffset(0);
-      await refreshDemoAccount(demoSessionId, { offset: 0 });
-      await refreshDemoOverview(demoSessionId);
-    } catch (error) {
-      const message = isAppError(error) ? error.message : "Demo trade that bai.";
-      pushDemoLog(message);
-    } finally {
-      setDemoBusy(false);
     }
   };
 
@@ -1769,45 +1729,48 @@ export function AutoTradingClient() {
           </section>
 
           <section className="glass-panel rounded-2xl p-6">
-            <h2 className="text-lg font-semibold text-slate-100">{UI_TEXT.autoTrading.demoTradeTitle}</h2>
-            <p className="mt-2 text-xs text-slate-400">{UI_TEXT.autoTrading.demoTradeHint}</p>
-            <form className="mt-4 grid gap-3 md:grid-cols-2 lg:grid-cols-4" onSubmit={handleDemoSubmit}>
-              <input
-                className="rounded-md border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100"
-                value={demoSymbol}
-                onChange={(e) => setDemoSymbol(e.target.value.toUpperCase())}
-                placeholder={UI_TEXT.dnse.symbol}
-              />
-              <select
-                className="rounded-md border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100"
-                value={demoSide}
-                onChange={(e) => setDemoSide(e.target.value as "buy" | "sell")}
-              >
-                <option value="buy">{UI_TEXT.dnse.buy}</option>
-                <option value="sell">{UI_TEXT.dnse.sell}</option>
-              </select>
-              <input
-                className="rounded-md border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100"
-                value={demoQty}
-                onChange={(e) => setDemoQty(e.target.value)}
-                placeholder={UI_TEXT.dnse.quantity}
-              />
-              <input
-                className="rounded-md border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100"
-                value={demoPrice}
-                onChange={(e) => setDemoPrice(e.target.value)}
-                placeholder={UI_TEXT.dnse.price}
-              />
-              <div className="md:col-span-2 lg:col-span-4">
-                <button
-                  type="submit"
-                  disabled={demoBusy}
-                  className="rounded-md bg-cyan-300/20 px-4 py-2 text-sm font-semibold text-cyan-50 disabled:opacity-50"
-                >
-                  {demoBusy ? UI_TEXT.autoTrading.demoSubmitting : UI_TEXT.autoTrading.demoSubmit}
-                </button>
+            <h3 className="text-sm font-semibold text-slate-200">Mail Entry Scheduler Log (Latest)</h3>
+            {mailSignalEntryRunError ? <p className="mt-2 text-xs text-rose-300">{mailSignalEntryRunError}</p> : null}
+            {!mailSignalEntryRun ? (
+              <p className="mt-3 text-xs text-slate-500">Chua co log entry scheduler.</p>
+            ) : (
+              <div className="mt-3 space-y-3 text-xs text-slate-300">
+                <p>
+                  Redis key: <span className="font-mono">{mailSignalEntryRun.redis_key}</span> | Source:{" "}
+                  <span className="font-mono">{mailSignalEntryRun.source_key}</span> | Account: {mailSignalEntryRun.account_mode}
+                </p>
+                <p>
+                  Ran at: {formatDateTime(mailSignalEntryRun.ran_at)} | Scanned: {mailSignalEntryRun.scanned} | Executed:{" "}
+                  {mailSignalEntryRun.executed.length} | Skipped: {mailSignalEntryRun.skipped.length}
+                </p>
+                {mailSignalEntryRun.executed.length === 0 ? (
+                  <p className="text-slate-500">Chua co lenh nao duoc ban trong lan chay gan nhat.</p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[620px] text-left text-xs text-slate-200">
+                      <thead className="border-b border-white/10 uppercase text-slate-500">
+                        <tr>
+                          <th className="py-2 pr-3">Symbol</th>
+                          <th className="py-2 pr-3">Quantity</th>
+                          <th className="py-2 pr-3">Status</th>
+                          <th className="py-2 pr-3">Order ID</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {mailSignalEntryRun.executed.map((row, idx) => (
+                          <tr key={`${row.symbol}-${idx}`} className="border-b border-white/5">
+                            <td className="py-2 pr-3 font-mono">{row.symbol}</td>
+                            <td className="py-2 pr-3">{Number(row.quantity || 0)}</td>
+                            <td className="py-2 pr-3">{row.status || "-"}</td>
+                            <td className="py-2 pr-3 font-mono">{row.order_id || "-"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
-            </form>
+            )}
           </section>
 
           <div className="grid gap-6 lg:grid-cols-2">
