@@ -36,6 +36,7 @@ import {
   type DemoSessionOverviewData,
 } from "@/services/auto-trading.api";
 import {
+  fetchShortTermLiquidityEligibleCache,
   fetchMailSignalEntryRunLatest,
   fetchMailSignalsLatest,
   fetchSchedulerDemoSession,
@@ -55,6 +56,7 @@ import {
   type MailSignalsData,
   type MailSignalEntryRunData,
   type ShortTermRunLogScopeBucket,
+  type LiquidityEligibleCacheRow,
 } from "@/services/automation.api";
 import {
   getCoreOrders,
@@ -258,6 +260,9 @@ export function AutoTradingClient() {
   const [mailSignalsError, setMailSignalsError] = useState("");
   const [mailSignalEntryRun, setMailSignalEntryRun] = useState<MailSignalEntryRunData | null>(null);
   const [mailSignalEntryRunError, setMailSignalEntryRunError] = useState("");
+  const [liquidityEligibleRows, setLiquidityEligibleRows] = useState<LiquidityEligibleCacheRow[]>([]);
+  const [liquidityEligibleError, setLiquidityEligibleError] = useState("");
+  const [liquidityEligibleTotal, setLiquidityEligibleTotal] = useState(0);
   const [automationLogScopeFilter, setAutomationLogScopeFilter] = useState<"ANY" | ShortTermExchangeScope>("ANY");
   const [manualCycleExchangeScope, setManualCycleExchangeScope] = useState<ShortTermExchangeScope>("ALL");
   const [manualCycleBusy, setManualCycleBusy] = useState(false);
@@ -702,6 +707,19 @@ export function AutoTradingClient() {
     }
   }, []);
 
+  const loadLiquidityEligibleRows = useCallback(async () => {
+    try {
+      const response = await fetchShortTermLiquidityEligibleCache("ALL", 600);
+      setLiquidityEligibleRows(response.data);
+      setLiquidityEligibleTotal(Number(response.meta?.total_matched ?? response.data.length));
+      setLiquidityEligibleError("");
+    } catch (error) {
+      setLiquidityEligibleRows([]);
+      setLiquidityEligibleTotal(0);
+      setLiquidityEligibleError(isAppError(error) ? error.message : "Khong tai duoc liquidity cache rows.");
+    }
+  }, []);
+
   useEffect(() => {
     const sessionId = getOrCreateDemoSessionId();
     setDemoSessionId(sessionId);
@@ -735,7 +753,15 @@ export function AutoTradingClient() {
     void loadAutomationRuns();
     void loadMailSignals();
     void loadMailSignalEntryRun();
-  }, [loadAutomationRuns, loadMailSignalEntryRun, loadMailSignals, loadSchedulerStateRows, loadSchedulerStatus]);
+    void loadLiquidityEligibleRows();
+  }, [
+    loadAutomationRuns,
+    loadLiquidityEligibleRows,
+    loadMailSignalEntryRun,
+    loadMailSignals,
+    loadSchedulerStateRows,
+    loadSchedulerStatus,
+  ]);
 
   useEffect(() => {
     // Match BE scan cadence: `interval_minutes` === `short_term_scan_interval_minutes` (not scheduler poll loop).
@@ -751,12 +777,14 @@ export function AutoTradingClient() {
       void loadAutomationRuns();
       void loadMailSignals();
       void loadMailSignalEntryRun();
+      void loadLiquidityEligibleRows();
     };
 
     const id = window.setInterval(tick, intervalMs);
     return () => window.clearInterval(id);
   }, [
     loadAutomationRuns,
+    loadLiquidityEligibleRows,
     loadMailSignalEntryRun,
     loadMailSignals,
     loadSchedulerStateRows,
@@ -1617,6 +1645,45 @@ export function AutoTradingClient() {
           </section>
 
           {schedulerError ? <p className="text-xs text-rose-300">{schedulerError}</p> : null}
+          <section className="glass-panel rounded-2xl p-6">
+            <h3 className="text-sm font-semibold text-slate-200">
+              Liquidity Cache Picks (eligible_spike=true + eligible_liquidity=true)
+            </h3>
+            {liquidityEligibleError ? <p className="mt-2 text-xs text-rose-300">{liquidityEligibleError}</p> : null}
+            {liquidityEligibleRows.length === 0 ? (
+              <p className="mt-3 text-xs text-slate-500">Chua co ma dat du ca 2 dieu kien trong Redis cache.</p>
+            ) : (
+              <div className="mt-3 space-y-3 text-xs text-slate-300">
+                <p className="text-slate-400">
+                  Tong so ma dat chuan: <span className="font-semibold text-cyan-200">{liquidityEligibleTotal}</span>
+                </p>
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[760px] text-left text-xs text-slate-200">
+                    <thead className="border-b border-white/10 uppercase tracking-wide text-slate-500">
+                      <tr>
+                        <th className="py-2.5 pr-4 whitespace-nowrap">Symbol</th>
+                        <th className="py-2.5 pr-4 whitespace-nowrap">Exchange</th>
+                        <th className="py-2.5 pr-4 whitespace-nowrap">Spike ratio</th>
+                        <th className="py-2.5 pr-4 whitespace-nowrap">Baseline vol</th>
+                        <th className="py-2.5 pr-4 whitespace-nowrap">Latest vol</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {liquidityEligibleRows.map((row) => (
+                        <tr key={row.redis_key} className="border-b border-white/5 align-top">
+                          <td className="py-2 pr-3 font-mono text-cyan-200">{row.symbol}</td>
+                          <td className="py-2 pr-3 text-slate-300">{row.exchange}</td>
+                          <td className="py-2 pr-3 text-emerald-300">{Number(row.spike_ratio || 0).toFixed(2)}x</td>
+                          <td className="py-2 pr-3 text-slate-100">{formatVnd(Number(row.baseline_vol || 0))}</td>
+                          <td className="py-2 pr-3 text-slate-100">{formatVnd(Number(row.latest_vol || 0))}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </section>
           <div className="rounded-md border border-white/10 bg-black/20 p-3 text-xs text-slate-300">
             <div className="flex flex-wrap items-end justify-between gap-3">
               <p className="font-semibold text-slate-200">Auto Trading Backend Logs ({schedulerAccountMode})</p>

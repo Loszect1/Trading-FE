@@ -114,6 +114,27 @@ export interface MailSignalEntryRunData {
   ran_at: string;
 }
 
+export interface LiquidityEligibleCacheRow {
+  symbol: string;
+  exchange: "HOSE" | "HNX" | "UPCOM" | string;
+  baseline_vol: number;
+  latest_vol: number;
+  spike_ratio: number;
+  eligible_liquidity: boolean;
+  eligible_spike: boolean;
+  redis_key: string;
+}
+
+export interface LiquidityEligibleCacheResponse {
+  data: LiquidityEligibleCacheRow[];
+  meta: {
+    exchange_scope: ShortTermExchangeScope;
+    limit: number;
+    total_matched: number;
+    returned: number;
+  };
+}
+
 export async function fetchSchedulerStatus(accountMode: "REAL" | "DEMO"): Promise<SchedulerStatus> {
   try {
     const response = await httpClient.get<SchedulerStatus>(
@@ -221,6 +242,27 @@ export async function fetchMailSignalEntryRunLatest(): Promise<MailSignalEntryRu
       "/automation/mail-signals/entry-run/latest",
     );
     return response.data.data ?? null;
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function fetchShortTermLiquidityEligibleCache(
+  exchangeScope: ShortTermExchangeScope = "ALL",
+  limit = 300,
+): Promise<LiquidityEligibleCacheResponse> {
+  try {
+    const response = await httpClient.get<{
+      success: boolean;
+      data: LiquidityEligibleCacheRow[];
+      meta: LiquidityEligibleCacheResponse["meta"];
+    }>(
+      `/automation/short-term/cache-eligible?exchange_scope=${encodeURIComponent(exchangeScope)}&limit=${encodeURIComponent(limit)}&latest_only=false`,
+    );
+    return {
+      data: response.data.data ?? [],
+      meta: response.data.meta,
+    };
   } catch (error) {
     throw normalizeError(error);
   }
