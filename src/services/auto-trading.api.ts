@@ -125,6 +125,26 @@ export async function fetchDemoSessions(limit = 50, offset = 0): Promise<DemoSes
   }
 }
 
+export async function deleteCurrentDemoSession(sessionId: string): Promise<string> {
+  try {
+    const response = await httpClient.delete<{ success: boolean; data: { deleted_session_id: string } }>(
+      "/auto-trading/demo/session-current",
+      {
+        headers: {
+          "X-Demo-Session-Id": sessionId,
+        },
+      },
+    );
+    const deletedSessionId = response.data.data?.deleted_session_id?.trim();
+    if (!deletedSessionId) {
+      throw new Error("Demo delete session response missing deleted_session_id");
+    }
+    return deletedSessionId;
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
 export async function fetchDemoAccount(
   sessionId: string,
   options?: { historyLimit?: number; historyOffset?: number },

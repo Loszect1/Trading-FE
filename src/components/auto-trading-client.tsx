@@ -29,6 +29,7 @@ import {
   pickSubAccountNumbers,
 } from "@/services/dnse.api";
 import {
+  deleteCurrentDemoSession,
   fetchDemoOverview,
   createNewDemoSession,
   fetchDemoAccount,
@@ -157,26 +158,14 @@ function formatDateTime(iso: string): string {
   return d.toLocaleString("vi-VN", { hour12: false });
 }
 
-function newDemoTradeId(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return crypto.randomUUID();
-  }
-  return `demo-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
 const DEMO_SESSION_STORAGE_KEY = "auto_trading_demo_session_id";
 
-function getOrCreateDemoSessionId(): string {
+function getStoredDemoSessionId(): string {
   if (typeof window === "undefined") {
-    return "default";
+    return "";
   }
   const existing = window.localStorage.getItem(DEMO_SESSION_STORAGE_KEY);
-  if (existing && existing.trim()) {
-    return existing.trim();
-  }
-  const created = newDemoTradeId();
-  window.localStorage.setItem(DEMO_SESSION_STORAGE_KEY, created);
-  return created;
+  return existing?.trim() ?? "";
 }
 
 async function attachQuotesForSymbols(symbols: SymbolItem[], signal: AbortSignal): Promise<SymbolSearchRow[]> {
@@ -721,31 +710,53 @@ export function AutoTradingClient() {
   }, []);
 
   useEffect(() => {
-    const sessionId = getOrCreateDemoSessionId();
-    setDemoSessionId(sessionId);
-    void setSchedulerDemoSession(sessionId);
-    setHistoryOffset(0);
-    void refreshDemoAccount(sessionId, { offset: 0 });
-    void refreshDemoOverview(sessionId);
-    void refreshDemoSessions();
-  }, [refreshDemoAccount, refreshDemoOverview, refreshDemoSessions]);
-
-  useEffect(() => {
+    let cancelled = false;
     void (async () => {
       try {
-        const active = await fetchSchedulerDemoSession();
-        if (active && active.trim()) {
-          window.localStorage.setItem(DEMO_SESSION_STORAGE_KEY, active.trim());
-          setDemoSessionId(active.trim());
-          setHistoryOffset(0);
-          void refreshDemoAccount(active.trim(), { offset: 0 });
-          void refreshDemoOverview(active.trim());
+        const [sessionList, schedulerActive] = await Promise.all([
+          fetchDemoSessions(100, 0),
+          fetchSchedulerDemoSession().catch(() => null),
+        ]);
+        if (cancelled) {
+          return;
         }
+        const items = sessionList.items ?? [];
+        setDemoSessions(items.map((item) => ({ session_id: item.session_id, created_at: item.created_at })));
+
+        const storedSessionId = getStoredDemoSessionId();
+        const schedulerSessionId = (schedulerActive ?? "").trim();
+        const existingIds = new Set(items.map((item) => item.session_id));
+        let resolvedSessionId = "";
+        if (storedSessionId && existingIds.has(storedSessionId)) {
+          resolvedSessionId = storedSessionId;
+        } else if (schedulerSessionId && existingIds.has(schedulerSessionId)) {
+          resolvedSessionId = schedulerSessionId;
+        } else if (items.length > 0) {
+          resolvedSessionId = items[0].session_id;
+        } else {
+          resolvedSessionId = await createNewDemoSession();
+        }
+        if (cancelled) {
+          return;
+        }
+        window.localStorage.setItem(DEMO_SESSION_STORAGE_KEY, resolvedSessionId);
+        setDemoSessionId(resolvedSessionId);
+        await setSchedulerDemoSession(resolvedSessionId);
+        if (cancelled) {
+          return;
+        }
+        setHistoryOffset(0);
+        await refreshDemoAccount(resolvedSessionId, { offset: 0 });
+        await refreshDemoOverview(resolvedSessionId);
+        await refreshDemoSessions();
       } catch {
-        // Keep UI resilient when scheduler demo-session endpoint is temporarily unavailable.
+        // Keep UI resilient during initial demo session bootstrap.
       }
     })();
-  }, [refreshDemoAccount, refreshDemoOverview]);
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshDemoAccount, refreshDemoOverview, refreshDemoSessions]);
 
   useEffect(() => {
     void loadSchedulerStatus();
@@ -949,6 +960,57 @@ export function AutoTradingClient() {
       pushDemoLog(UI_TEXT.autoTrading.demoNewSessionCreated);
     } catch (error) {
       const message = isAppError(error) ? error.message : "Tao phien demo moi that bai.";
+      pushDemoLog(message);
+    } finally {
+      setDemoSessionBusy(false);
+    }
+  };
+
+  const handleDeleteCurrentDemoSession = async () => {
+    if (demoSessionBusy) {
+      return;
+    }
+    if (!demoSessionId.trim()) {
+      pushDemoLog("Khong co demo session hien tai de xoa.");
+      return;
+    }
+    const confirmed = window.confirm(UI_TEXT.autoTrading.demoDeleteSessionConfirm(demoSessionId));
+    if (!confirmed) {
+      return;
+    }
+    setDemoSessionBusy(true);
+    try {
+      const deletedSessionId = await deleteCurrentDemoSession(demoSessionId);
+      const sessionList = await fetchDemoSessions(100, 0);
+      const remainingSessions = (sessionList.items ?? []).filter((item) => item.session_id !== deletedSessionId);
+      let nextSessionId = remainingSessions[0]?.session_id?.trim() ?? "";
+      if (!nextSessionId) {
+        nextSessionId = await createNewDemoSession();
+      }
+      window.localStorage.setItem(DEMO_SESSION_STORAGE_KEY, nextSessionId);
+      setDemoSessionId(nextSessionId);
+      await setSchedulerDemoSession(nextSessionId || null);
+      setHistoryOffset(0);
+      setDemoOrders([]);
+      setDemoLog([]);
+      setDemoPositions([]);
+      setDemoRealizedPnl(0);
+      setDemoUnrealizedPnl(0);
+      setDemoCash(DEMO_INITIAL_CASH_VND);
+      setDemoEquity(DEMO_INITIAL_CASH_VND);
+      setDemoOverview(null);
+      setDemoOverviewError("");
+      setDemoPortfolioSnapshot({
+        totalAssets: DEMO_INITIAL_CASH_VND,
+        cashAvailable: DEMO_INITIAL_CASH_VND,
+        stockValue: 0,
+      });
+      await refreshDemoSessions();
+      await refreshDemoAccount(nextSessionId, { offset: 0 });
+      await refreshDemoOverview(nextSessionId);
+      pushDemoLog(UI_TEXT.autoTrading.demoDeleteSessionSuccess(deletedSessionId, nextSessionId));
+    } catch (error) {
+      const message = isAppError(error) ? error.message : "Xoa phien demo hien tai that bai.";
       pushDemoLog(message);
     } finally {
       setDemoSessionBusy(false);
@@ -1454,14 +1516,24 @@ export function AutoTradingClient() {
           <section className="glass-panel rounded-2xl p-6">
             <div className="flex items-start justify-between gap-3">
               <h2 className="text-lg font-semibold text-slate-100">{UI_TEXT.autoTrading.demoBalanceTitle}</h2>
-              <button
-                type="button"
-                onClick={() => void handleNewDemoSession()}
-                disabled={demoSessionBusy}
-                className="rounded-md border border-cyan-300/40 px-3 py-2 text-xs font-semibold text-cyan-100 disabled:opacity-50"
-              >
-                {demoSessionBusy ? UI_TEXT.autoTrading.demoNewSessionCreating : UI_TEXT.autoTrading.demoNewSession}
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleNewDemoSession()}
+                  disabled={demoSessionBusy}
+                  className="rounded-md border border-cyan-300/40 px-3 py-2 text-xs font-semibold text-cyan-100 disabled:opacity-50"
+                >
+                  {demoSessionBusy ? UI_TEXT.autoTrading.demoNewSessionCreating : UI_TEXT.autoTrading.demoNewSession}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleDeleteCurrentDemoSession()}
+                  disabled={demoSessionBusy || !demoSessionId.trim()}
+                  className="rounded-md border border-rose-300/40 px-3 py-2 text-xs font-semibold text-rose-100 disabled:opacity-50"
+                >
+                  {demoSessionBusy ? UI_TEXT.autoTrading.demoDeleteSessionDeleting : UI_TEXT.autoTrading.demoDeleteSession}
+                </button>
+              </div>
             </div>
             <p className="mt-2 text-3xl font-semibold tracking-tight text-cyan-100">
               {formatVnd(demoCash)} VND
@@ -1473,6 +1545,9 @@ export function AutoTradingClient() {
                 value={demoSessionId}
                 onChange={(e) => {
                   const nextId = e.target.value;
+                  if (!nextId.trim()) {
+                    return;
+                  }
                   window.localStorage.setItem(DEMO_SESSION_STORAGE_KEY, nextId);
                   setDemoSessionId(nextId);
                   void setSchedulerDemoSession(nextId);
@@ -1483,6 +1558,9 @@ export function AutoTradingClient() {
                 disabled={demoSessionsLoading || demoSessionBusy}
                 className="w-full rounded-md border border-white/15 bg-black/30 px-3 py-2 text-xs text-slate-100"
               >
+                {!demoSessionId ? (
+                  <option value="">{UI_TEXT.autoTrading.demoSessionListEmpty}</option>
+                ) : null}
                 {demoSessions.map((session) => (
                   <option key={session.session_id} value={session.session_id}>
                     {session.session_id} | {session.created_at}

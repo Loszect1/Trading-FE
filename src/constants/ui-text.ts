@@ -350,7 +350,16 @@ export const UI_TEXT = {
     demoNewSession: "New Demo",
     demoNewSessionCreating: "Đang tạo phiên mới...",
     demoNewSessionCreated: "Đã tạo phiên demo mới.",
+    demoDeleteSession: "Xoa session hien tai",
+    demoDeleteSessionDeleting: "Dang xu ly...",
+    demoDeleteSessionConfirm: (sessionId: string) =>
+      `Ban chac chan muon xoa demo session hien tai (${sessionId})? Hanh dong nay khong the hoan tac.`,
+    demoDeleteSessionSuccess: (deletedSessionId: string, nextSessionId: string) =>
+      nextSessionId
+        ? `Da xoa session ${deletedSessionId}. Da chuyen sang session ${nextSessionId}.`
+        : `Da xoa session ${deletedSessionId}. Khong con session nao trong danh sach.`,
     demoSessionListLabel: "Chọn phiên Demo",
+    demoSessionListEmpty: "Khong con demo session",
     demoSessionListLoading: "Đang tải danh sách phiên...",
     demoTradeTitle: "Lệnh mô phỏng",
     demoTradeHint:
