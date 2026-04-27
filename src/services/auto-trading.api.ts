@@ -86,16 +86,32 @@ export interface DemoHoldingOverviewItem {
   opened_at: string;
 }
 
+export interface DemoStrategyCashOverviewItem {
+  strategy_code: "SHORT_TERM" | "MAIL_SIGNAL" | "UNALLOCATED";
+  allocation_pct: number;
+  cash_value: number;
+  used_cash_value: number;
+  remaining_cash_value: number;
+}
+
 export interface DemoSessionOverviewData {
   session_id: string;
   is_active: boolean;
+  initial_balance: number;
   cash_balance: number;
   realized_pnl: number;
   trade_count: number;
   holdings_count: number;
   holdings: DemoHoldingOverviewItem[];
+  strategy_cash_overview: DemoStrategyCashOverviewItem[];
   created_at: string;
   updated_at: string;
+}
+
+export interface DemoStrategyCashTransferBody {
+  from_strategy?: "UNALLOCATED" | "SHORT_TERM" | "MAIL_SIGNAL";
+  to_strategy: "SHORT_TERM" | "MAIL_SIGNAL" | "UNALLOCATED";
+  amount_vnd: number;
 }
 
 export async function createNewDemoSession(): Promise<string> {
@@ -196,6 +212,25 @@ export async function fetchDemoOverview(sessionId: string): Promise<DemoSessionO
         },
       },
     );
+    return response.data.data;
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function transferDemoStrategyCash(
+  sessionId: string,
+  body: DemoStrategyCashTransferBody,
+): Promise<{ session_id: string; transferred_to: "SHORT_TERM" | "MAIL_SIGNAL" | "UNALLOCATED"; amount_vnd: number }> {
+  try {
+    const response = await httpClient.post<{
+      success: boolean;
+      data: { session_id: string; transferred_to: "SHORT_TERM" | "MAIL_SIGNAL" | "UNALLOCATED"; amount_vnd: number };
+    }>("/auto-trading/demo/strategy-cash/transfer", body, {
+      headers: {
+        "X-Demo-Session-Id": sessionId,
+      },
+    });
     return response.data.data;
   } catch (error) {
     throw normalizeError(error);

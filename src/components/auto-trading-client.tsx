@@ -1,8 +1,6 @@
 "use client";
 
-import type { FormEvent } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import Link from "next/link";
 import {
   Bar,
   BarChart,
@@ -23,6 +21,7 @@ import {
   dnseAuthLogout,
   extractDnseRecords,
   fetchDnseAccount,
+  fetchDnseAccountBalance,
   fetchDnseDefaults,
   fetchDnseSubAccounts,
   isAppError,
@@ -34,6 +33,7 @@ import {
   createNewDemoSession,
   fetchDemoAccount,
   fetchDemoSessions,
+  transferDemoStrategyCash,
   type DemoSessionOverviewData,
 } from "@/services/auto-trading.api";
 import {
@@ -42,7 +42,6 @@ import {
   fetchMailSignalsLatest,
   fetchSchedulerDemoSession,
   fetchShortTermAsyncJob,
-  fetchSchedulerStateRows,
   parseShortTermRunExchangeScope,
   fetchSchedulerStatus,
   fetchShortTermRuns,
@@ -59,26 +58,12 @@ import {
   type ShortTermRunLogScopeBucket,
   type LiquidityEligibleCacheRow,
 } from "@/services/automation.api";
-import {
-  getCoreOrders,
-  getCorePositions,
-  getOrderEvents,
-  placeExecutionOrder,
-  processExecutionOrder,
-} from "@/services/trading-core.api";
-import { getAllSymbols, getCompanyOverview, getSymbolDailyQuoteSnapshot } from "@/services/vnstock.api";
-import type { CompanyOverview, SymbolItem } from "@/types/vnstock";
+import { getSymbolDailyQuoteSnapshot } from "@/services/vnstock.api";
 
 type AccountTab = "real" | "demo";
 
 const DEMO_INITIAL_CASH_VND = 100_000_000;
 const AUTO_TRADING_BACKEND_LOGS_PER_SCOPE = 5;
-
-interface SymbolSearchRow extends SymbolItem {
-  lastPrice?: number;
-  changePercent?: number;
-  quoteError?: boolean;
-}
 
 interface DemoPosition {
   symbol: string;
@@ -103,7 +88,12 @@ interface DemoPortfolioSnapshot {
   stockValue: number;
 }
 
-type OrderStatus = "NEW" | "SENT" | "ACK" | "FILLED" | "REJECTED" | "CANCELLED";
+interface DnseHoldingSummaryRow {
+  symbol: string;
+  quantity: number;
+  averagePrice: number | null;
+  marketPrice: number | null;
+}
 
 const STATUS_COLOR_CLASS = {
   order: {
@@ -142,14 +132,6 @@ function formatPrice(n: number): string {
   return new Intl.NumberFormat("vi-VN", { maximumFractionDigits: 2 }).format(n);
 }
 
-function formatPct(n: number | undefined): string {
-  if (n === undefined || !Number.isFinite(n)) {
-    return "-";
-  }
-  const sign = n > 0 ? "+" : "";
-  return `${sign}${n.toFixed(2)}%`;
-}
-
 function formatDateTime(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) {
@@ -171,32 +153,6 @@ function getStoredDemoSessionId(): string {
   }
   const existing = window.localStorage.getItem(DEMO_SESSION_STORAGE_KEY);
   return existing?.trim() ?? "";
-}
-
-async function attachQuotesForSymbols(symbols: SymbolItem[], signal: AbortSignal): Promise<SymbolSearchRow[]> {
-  const out: SymbolSearchRow[] = [];
-  const batchSize = 6;
-  for (let i = 0; i < symbols.length; i += batchSize) {
-    if (signal.aborted) {
-      break;
-    }
-    const chunk = symbols.slice(i, i + batchSize);
-    const snaps = await Promise.all(chunk.map((item) => getSymbolDailyQuoteSnapshot(item.symbol)));
-    if (signal.aborted) {
-      break;
-    }
-    for (let j = 0; j < chunk.length; j += 1) {
-      const item = chunk[j];
-      const snap = snaps[j];
-      out.push({
-        ...item,
-        lastPrice: snap?.lastPrice,
-        changePercent: snap?.changePercent,
-        quoteError: snap === null,
-      });
-    }
-  }
-  return out;
 }
 
 function asyncJobStatusClass(status: string): string {
@@ -229,6 +185,131 @@ function formatElapsedSeconds(startedAt: string, finishedAt?: string | null): st
   return `${seconds}s`;
 }
 
+function parseNumberCandidate(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function extractDnseCashFromRows(rows: Record<string, unknown>[]): number | null {
+  const cashKeys = [
+    "cash",
+    "cashBalance",
+    "cash_balance",
+    "availableCash",
+    "available_cash",
+    "buyingPower",
+    "buying_power",
+    "netCash",
+    "net_cash",
+  ];
+  for (const row of rows) {
+    for (const key of cashKeys) {
+      const n = parseNumberCandidate(row[key]);
+      if (n != null && n >= 0) {
+        return n;
+      }
+    }
+  }
+  return null;
+}
+
+function extractDnseTradableCashFromRows(rows: Record<string, unknown>[]): number | null {
+  const tradableKeys = [
+    "buyingPower",
+    "buying_power",
+    "availableTradingCash",
+    "available_trading_cash",
+    "availableToTrade",
+    "available_to_trade",
+    "cashAvailableForTrading",
+    "cash_available_for_trading",
+  ];
+  for (const row of rows) {
+    for (const key of tradableKeys) {
+      const n = parseNumberCandidate(row[key]);
+      if (n != null && n >= 0) {
+        return n;
+      }
+    }
+  }
+  return null;
+}
+
+function extractDnseAccountNameFromRows(rows: Record<string, unknown>[]): string | null {
+  const nameKeys = [
+    "customerName",
+    "customer_name",
+    "fullName",
+    "full_name",
+    "accountName",
+    "account_name",
+    "investorName",
+    "investor_name",
+    "name",
+  ];
+  for (const row of rows) {
+    for (const key of nameKeys) {
+      const raw = row[key];
+      if (typeof raw === "string" && raw.trim()) {
+        return raw.trim();
+      }
+    }
+  }
+  return null;
+}
+
+function extractDnseDepositedAmountFromRows(rows: Record<string, unknown>[]): { value: number; sourceKey: string } | null {
+  const depositKeys = ["initialBalance", "initial_balance"];
+  for (const row of rows) {
+    for (const key of depositKeys) {
+      const n = parseNumberCandidate(row[key]);
+      if (n != null && n >= 0) {
+        return { value: n, sourceKey: key };
+      }
+    }
+  }
+  return null;
+}
+
+function extractDnseHoldingsFromRows(rows: Record<string, unknown>[]): DnseHoldingSummaryRow[] {
+  const out: DnseHoldingSummaryRow[] = [];
+  for (const row of rows) {
+    const symbolRaw = row.symbol ?? row.stockSymbol ?? row.stock_code ?? row.ticker;
+    const symbol = String(symbolRaw ?? "").trim().toUpperCase();
+    if (!symbol) {
+      continue;
+    }
+    const qty =
+      parseNumberCandidate(row.quantity) ??
+      parseNumberCandidate(row.qty) ??
+      parseNumberCandidate(row.totalQuantity) ??
+      parseNumberCandidate(row.total_quantity) ??
+      0;
+    if (!Number.isFinite(qty) || qty <= 0) {
+      continue;
+    }
+    const avg =
+      parseNumberCandidate(row.avgPrice) ??
+      parseNumberCandidate(row.avg_price) ??
+      parseNumberCandidate(row.averagePrice) ??
+      parseNumberCandidate(row.average_price) ??
+      null;
+    const market =
+      parseNumberCandidate(row.marketPrice) ??
+      parseNumberCandidate(row.market_price) ??
+      parseNumberCandidate(row.lastPrice) ??
+      parseNumberCandidate(row.last_price) ??
+      null;
+    out.push({
+      symbol,
+      quantity: Math.trunc(qty),
+      averagePrice: avg,
+      marketPrice: market,
+    });
+  }
+  return out;
+}
+
 const OVERVIEW_DONUT_COLORS = ["#34d399", "#60a5fa"];
 const HOLDINGS_BAR_COLOR = "#a78bfa";
 
@@ -245,9 +326,6 @@ export function AutoTradingClient() {
   } | null>(null);
   const [schedulerBusy, setSchedulerBusy] = useState(false);
   const [schedulerError, setSchedulerError] = useState("");
-  const [schedulerStateRows, setSchedulerStateRows] = useState<
-    Array<{ account_mode: "REAL" | "DEMO"; enabled: boolean; updated_at: string }>
-  >([]);
   const [automationRuns, setAutomationRuns] = useState<ShortTermAutomationRunRow[]>([]);
   const [automationRunsError, setAutomationRunsError] = useState("");
   const [mailSignals, setMailSignals] = useState<MailSignalsData | null>(null);
@@ -272,54 +350,23 @@ export function AutoTradingClient() {
   const [sessionBusy, setSessionBusy] = useState(false);
   const [accountProbeBusy, setAccountProbeBusy] = useState(false);
   const [accountProbeMessage, setAccountProbeMessage] = useState("");
-
-  const [allSymbols, setAllSymbols] = useState<SymbolItem[]>([]);
-  const [symbolsLoadState, setSymbolsLoadState] = useState<"idle" | "loading" | "error" | "ready">("loading");
-  const [symbolsError, setSymbolsError] = useState("");
-  const [tickerInput, setTickerInput] = useState("");
-  const [debouncedTicker, setDebouncedTicker] = useState("");
-  const [searchBusy, setSearchBusy] = useState(false);
-  const [searchRows, setSearchRows] = useState<SymbolSearchRow[]>([]);
-  const [searchMessage, setSearchMessage] = useState("");
-  const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
-  const [overview, setOverview] = useState<CompanyOverview | null>(null);
-  const [overviewBusy, setOverviewBusy] = useState(false);
-  const [overviewError, setOverviewError] = useState("");
-  const [realOrderSymbol, setRealOrderSymbol] = useState("");
-  const [realOrderSide, setRealOrderSide] = useState<"BUY" | "SELL">("BUY");
-  const [realOrderQty, setRealOrderQty] = useState("100");
-  const [realOrderPrice, setRealOrderPrice] = useState("");
-  const [realOrderBusy, setRealOrderBusy] = useState(false);
-  const [realOrderMessage, setRealOrderMessage] = useState("");
-  const [realStatusFilter, setRealStatusFilter] = useState<"ALL" | OrderStatus>("ALL");
-  const [realAutoProcess, setRealAutoProcess] = useState(true);
-  const [realOrderIdempotencyKey, setRealOrderIdempotencyKey] = useState("");
-  const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
-  const [selectedOrderEvents, setSelectedOrderEvents] = useState<
-    Array<{ id: string; status: string; message?: string | null; created_at: string }>
-  >([]);
-  const [orderEventsBusy, setOrderEventsBusy] = useState(false);
-  const [realOrders, setRealOrders] = useState<
-    Array<{
-      id: string;
-      symbol: string;
-      side: "BUY" | "SELL";
-      quantity: number;
-      price: number;
-      status: string;
-      reason?: string | null;
-      created_at: string;
-    }>
-  >([]);
+  const [dnseAccountSummary, setDnseAccountSummary] = useState<{
+    accountRows: number;
+    subAccountRows: number;
+    subAccounts: string[];
+    accountName: string | null;
+    depositedAmount: number | null;
+    cashCurrent: number | null;
+    tradableCash: number | null;
+    holdings: DnseHoldingSummaryRow[];
+  } | null>(null);
 
   const [demoSessionId, setDemoSessionId] = useState("default");
   const [demoSessions, setDemoSessions] = useState<Array<{ session_id: string; created_at: string }>>([]);
   const [demoSessionsLoading, setDemoSessionsLoading] = useState(false);
   const [demoCash, setDemoCash] = useState(DEMO_INITIAL_CASH_VND);
   const [demoPositions, setDemoPositions] = useState<DemoPosition[]>([]);
-  const [demoRealizedPnl, setDemoRealizedPnl] = useState(0);
   const [demoUnrealizedPnl, setDemoUnrealizedPnl] = useState(0);
-  const [demoEquity, setDemoEquity] = useState(DEMO_INITIAL_CASH_VND);
   const [demoOrders, setDemoOrders] = useState<DemoOrderItem[]>([]);
   const [historyOffset, setHistoryOffset] = useState(0);
   const [historyLimit] = useState(30);
@@ -329,6 +376,13 @@ export function AutoTradingClient() {
   const [demoLog, setDemoLog] = useState<string[]>([]);
   const [demoOverview, setDemoOverview] = useState<DemoSessionOverviewData | null>(null);
   const [demoOverviewError, setDemoOverviewError] = useState("");
+  const [strategyCashTransferTarget, setStrategyCashTransferTarget] = useState<"SHORT_TERM" | "MAIL_SIGNAL" | "UNALLOCATED">(
+    "SHORT_TERM",
+  );
+  const [strategyCashWithdrawSource, setStrategyCashWithdrawSource] = useState<"SHORT_TERM" | "MAIL_SIGNAL">("SHORT_TERM");
+  const [strategyCashTransferAmount, setStrategyCashTransferAmount] = useState("");
+  const [strategyCashWithdrawAmount, setStrategyCashWithdrawAmount] = useState("");
+  const [strategyCashTransferBusy, setStrategyCashTransferBusy] = useState(false);
   const [holdingLastPriceBySymbol, setHoldingLastPriceBySymbol] = useState<Record<string, number>>({});
   const [demoPortfolioSnapshot, setDemoPortfolioSnapshot] = useState<DemoPortfolioSnapshot>({
     totalAssets: DEMO_INITIAL_CASH_VND,
@@ -389,6 +443,10 @@ export function AutoTradingClient() {
     let totalEntryGateSkip = 0;
     let totalCooldownSkip = 0;
     let totalDynamicFloorSkip = 0;
+    let totalThresholdSourceClaude = 0;
+    let totalThresholdSourceHeuristic = 0;
+    let totalPlannedSpent = 0;
+    let totalActualSpent = 0;
     let dynamicFloorSum = 0;
     let dynamicFloorCount = 0;
     for (const run of scopedRuns) {
@@ -401,9 +459,18 @@ export function AutoTradingClient() {
       const cooldown = asFiniteNumber(detail.skipped_experience_cooldown);
       const dynSkip = asFiniteNumber(detail.skipped_dynamic_buy_floor);
       const dynFloor = asFiniteNumber(detail.dynamic_buy_composite_floor);
+      const sourceClaude = asFiniteNumber(detail.experience_threshold_source_claude);
+      const sourceHeuristic = asFiniteNumber(detail.experience_threshold_source_heuristic);
+      const decisionMeta = (detail.buy_decision_meta ?? {}) as Record<string, unknown>;
+      const plannedSpent = asFiniteNumber(decisionMeta.planned_spent);
+      const actualSpent = asFiniteNumber(decisionMeta.actual_spent);
       totalEntryGateSkip += entryGate ?? 0;
       totalCooldownSkip += cooldown ?? 0;
       totalDynamicFloorSkip += dynSkip ?? 0;
+      totalThresholdSourceClaude += sourceClaude ?? 0;
+      totalThresholdSourceHeuristic += sourceHeuristic ?? 0;
+      totalPlannedSpent += plannedSpent ?? 0;
+      totalActualSpent += actualSpent ?? 0;
       if (dynFloor != null) {
         dynamicFloorSum += dynFloor;
         dynamicFloorCount += 1;
@@ -419,6 +486,10 @@ export function AutoTradingClient() {
       totalEntryGateSkip,
       totalCooldownSkip,
       totalDynamicFloorSkip,
+      totalThresholdSourceClaude,
+      totalThresholdSourceHeuristic,
+      totalPlannedSpent,
+      totalActualSpent,
       avgDynamicFloor: dynamicFloorCount > 0 ? dynamicFloorSum / dynamicFloorCount : null,
     };
   }, [automationRuns, demoSessionId, schedulerAccountMode]);
@@ -476,153 +547,6 @@ export function AutoTradingClient() {
     setSessionActive(hasDnseSession());
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    setSymbolsLoadState("loading");
-    setSymbolsError("");
-    void (async () => {
-      try {
-        const list = await getAllSymbols();
-        if (!cancelled) {
-          setAllSymbols(list);
-          setSymbolsLoadState("ready");
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setSymbolsLoadState("error");
-          setSymbolsError(isAppError(error) ? error.message : UI_TEXT.autoTrading.symbolsLoadFailed);
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    const t = window.setTimeout(() => setDebouncedTicker(tickerInput.trim().toUpperCase()), 350);
-    return () => window.clearTimeout(t);
-  }, [tickerInput]);
-
-  useEffect(() => {
-    if (symbolsLoadState !== "ready") {
-      setSearchRows([]);
-      setSearchMessage("");
-      setSearchBusy(false);
-      return;
-    }
-    const q = debouncedTicker;
-    if (!q) {
-      setSearchRows([]);
-      setSearchMessage(UI_TEXT.autoTrading.searchHintEmpty);
-      setSearchBusy(false);
-      return;
-    }
-
-    const controller = new AbortController();
-    const matches = allSymbols
-      .filter((s) => s.symbol.includes(q))
-      .slice(0, 24);
-
-    if (matches.length === 0) {
-      setSearchRows([]);
-      setSearchMessage(UI_TEXT.autoTrading.searchNoResults);
-      setSearchBusy(false);
-      return;
-    }
-
-    setSearchBusy(true);
-    setSearchMessage(UI_TEXT.autoTrading.searchLoadingQuotes);
-    void (async () => {
-      try {
-        const rows = await attachQuotesForSymbols(matches, controller.signal);
-        if (!controller.signal.aborted) {
-          setSearchRows(rows);
-          setSearchMessage(UI_TEXT.autoTrading.searchResultsCount(rows.length));
-        }
-      } catch {
-        if (!controller.signal.aborted) {
-          setSearchRows(matches.map((m) => ({ ...m, quoteError: true })));
-          setSearchMessage(UI_TEXT.autoTrading.searchQuotePartialFail);
-        }
-      } finally {
-        if (!controller.signal.aborted) {
-          setSearchBusy(false);
-        }
-      }
-    })();
-
-    return () => controller.abort();
-  }, [allSymbols, debouncedTicker, symbolsLoadState]);
-
-  useEffect(() => {
-    if (!selectedSymbol) {
-      setOverview(null);
-      setOverviewError("");
-      return;
-    }
-    let cancelled = false;
-    setOverviewBusy(true);
-    setOverviewError("");
-    void (async () => {
-      try {
-        const data = await getCompanyOverview(selectedSymbol);
-        if (!cancelled) {
-          setOverview(data);
-          if (!data) {
-            setOverviewError(UI_TEXT.autoTrading.overviewEmpty);
-          }
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setOverview(null);
-          setOverviewError(isAppError(error) ? error.message : UI_TEXT.autoTrading.overviewFailed);
-        }
-      } finally {
-        if (!cancelled) {
-          setOverviewBusy(false);
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedSymbol]);
-
-  const refreshRealOrders = useCallback(async () => {
-    try {
-      const rows = await getCoreOrders("REAL", 20);
-      setRealOrders(rows);
-    } catch (error) {
-      const message = isAppError(error) ? error.message : "Khong tai duoc danh sach lenh Real.";
-      setRealOrderMessage(message);
-    }
-  }, []);
-
-  const loadOrderEvents = useCallback(async (orderId: string) => {
-    setOrderEventsBusy(true);
-    try {
-      const rows = await getOrderEvents(orderId);
-      setSelectedOrderEvents(
-        rows.map((row) => ({
-          id: row.id,
-          status: row.status,
-          message: row.message,
-          created_at: row.created_at,
-        })),
-      );
-    } catch (error) {
-      const message = isAppError(error) ? error.message : "Khong tai duoc order events.";
-      setRealOrderMessage(message);
-    } finally {
-      setOrderEventsBusy(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void refreshRealOrders();
-  }, [refreshRealOrders]);
-
   const pushDemoLog = useCallback((line: string) => {
     setDemoLog((prev) => [...prev.slice(-80), `${new Date().toISOString()} ${line}`]);
   }, []);
@@ -637,9 +561,7 @@ export function AutoTradingClient() {
         });
         setDemoCash(account.cash_balance);
         setDemoPositions(account.positions);
-        setDemoRealizedPnl(account.realized_pnl);
         setDemoUnrealizedPnl(account.unrealized_pnl);
-        setDemoEquity(account.equity_approx_vnd);
         setHistoryTotal(account.trade_history_total);
         setDemoOrders((prev) => {
           const mapped: DemoOrderItem[] = account.trade_history.map((item) => ({
@@ -720,6 +642,60 @@ export function AutoTradingClient() {
     [pushDemoLog],
   );
 
+  const handleTransferUnallocatedCash = useCallback(async () => {
+    const amount = Number(strategyCashTransferAmount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setDemoOverviewError("So tien chuyen phai > 0.");
+      return;
+    }
+    setStrategyCashTransferBusy(true);
+    try {
+      await transferDemoStrategyCash(demoSessionId, {
+        from_strategy: "UNALLOCATED",
+        to_strategy: strategyCashTransferTarget,
+        amount_vnd: amount,
+      });
+      if (strategyCashTransferTarget === "UNALLOCATED") {
+        pushDemoLog(`Da nap them ${formatVnd(amount)} VND tu ben ngoai vao UNALLOCATED.`);
+      } else {
+        pushDemoLog(`Da chuyen ${formatVnd(amount)} VND tu UNALLOCATED sang ${strategyCashTransferTarget}.`);
+      }
+      setStrategyCashTransferAmount("");
+      await refreshDemoOverview(demoSessionId);
+    } catch (error) {
+      const message = isAppError(error) ? error.message : "Chuyen tien strategy that bai.";
+      setDemoOverviewError(message);
+      pushDemoLog(message);
+    } finally {
+      setStrategyCashTransferBusy(false);
+    }
+  }, [demoSessionId, pushDemoLog, refreshDemoOverview, strategyCashTransferAmount, strategyCashTransferTarget]);
+
+  const handleWithdrawToUnallocated = useCallback(async () => {
+    const amount = Number(strategyCashWithdrawAmount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setDemoOverviewError("So tien rut phai > 0.");
+      return;
+    }
+    setStrategyCashTransferBusy(true);
+    try {
+      await transferDemoStrategyCash(demoSessionId, {
+        from_strategy: strategyCashWithdrawSource,
+        to_strategy: "UNALLOCATED",
+        amount_vnd: amount,
+      });
+      pushDemoLog(`Da rut ${formatVnd(amount)} VND tu ${strategyCashWithdrawSource} ve UNALLOCATED.`);
+      setStrategyCashWithdrawAmount("");
+      await refreshDemoOverview(demoSessionId);
+    } catch (error) {
+      const message = isAppError(error) ? error.message : "Rut tien ve UNALLOCATED that bai.";
+      setDemoOverviewError(message);
+      pushDemoLog(message);
+    } finally {
+      setStrategyCashTransferBusy(false);
+    }
+  }, [demoSessionId, pushDemoLog, refreshDemoOverview, strategyCashWithdrawAmount, strategyCashWithdrawSource]);
+
   const loadSchedulerStatus = useCallback(async () => {
     try {
       const status = await fetchSchedulerStatus(schedulerAccountMode);
@@ -730,15 +706,6 @@ export function AutoTradingClient() {
       setSchedulerError(isAppError(error) ? error.message : "Khong tai duoc trang thai auto trading.");
     }
   }, [schedulerAccountMode]);
-
-  const loadSchedulerStateRows = useCallback(async () => {
-    try {
-      const rows = await fetchSchedulerStateRows();
-      setSchedulerStateRows(rows);
-    } catch {
-      // Keep scheduler status UX stable even if admin DB-state endpoint fails.
-    }
-  }, []);
 
   const loadAutomationRuns = useCallback(async () => {
     try {
@@ -837,7 +804,6 @@ export function AutoTradingClient() {
 
   useEffect(() => {
     void loadSchedulerStatus();
-    void loadSchedulerStateRows();
     void loadAutomationRuns();
     void loadMailSignals();
     void loadMailSignalEntryRun();
@@ -847,7 +813,6 @@ export function AutoTradingClient() {
     loadLiquidityEligibleRows,
     loadMailSignalEntryRun,
     loadMailSignals,
-    loadSchedulerStateRows,
     loadSchedulerStatus,
   ]);
 
@@ -861,7 +826,6 @@ export function AutoTradingClient() {
         return;
       }
       void loadSchedulerStatus();
-      void loadSchedulerStateRows();
       void loadAutomationRuns();
       void loadMailSignals();
       void loadMailSignalEntryRun();
@@ -875,7 +839,6 @@ export function AutoTradingClient() {
     loadLiquidityEligibleRows,
     loadMailSignalEntryRun,
     loadMailSignals,
-    loadSchedulerStateRows,
     loadSchedulerStatus,
     schedulerAccountMode,
     schedulerStatus?.interval_minutes,
@@ -887,6 +850,7 @@ export function AutoTradingClient() {
       await dnseAuthLogin(username.trim(), password);
       setPassword("");
       setSessionActive(true);
+      await handleProbeAccount();
       showToast(TOAST_MESSAGES.dnseSessionSaved, "success");
     } catch (error) {
       const message = isAppError(error) ? error.message : TOAST_MESSAGES.dnseLoginFailed;
@@ -911,6 +875,8 @@ export function AutoTradingClient() {
   const handleDnseLogout = () => {
     dnseAuthLogout();
     setSessionActive(false);
+    setDnseAccountSummary(null);
+    setAccountProbeMessage("");
     showToast(TOAST_MESSAGES.dnseSessionCleared, "success");
   };
 
@@ -924,84 +890,33 @@ export function AutoTradingClient() {
       const accRows = extractDnseRecords(accRes);
       const subRows = extractDnseRecords(subRes);
       const nums = pickSubAccountNumbers(subRows);
+      const preferredSubAccount = nums[0];
+      const balanceRows = preferredSubAccount
+        ? extractDnseRecords(await fetchDnseAccountBalance({ ...creds, sub_account: preferredSubAccount }))
+        : [];
+      const holdings = extractDnseHoldingsFromRows(balanceRows);
+      const cashCurrent = extractDnseCashFromRows(balanceRows) ?? extractDnseCashFromRows(accRows);
+      const tradableCash = extractDnseTradableCashFromRows(balanceRows) ?? extractDnseTradableCashFromRows(accRows);
+      const accountName = extractDnseAccountNameFromRows(accRows);
+      const depositedInfo = extractDnseDepositedAmountFromRows(accRows);
+      setDnseAccountSummary({
+        accountRows: accRows.length,
+        subAccountRows: subRows.length,
+        subAccounts: nums,
+        accountName,
+        depositedAmount: depositedInfo?.value ?? null,
+        cashCurrent,
+        tradableCash: tradableCash ?? cashCurrent,
+        holdings,
+      });
       setAccountProbeMessage(
         UI_TEXT.autoTrading.accountProbeOk(accRows.length, subRows.length, nums.length),
       );
     } catch (error) {
+      setDnseAccountSummary(null);
       setAccountProbeMessage(isAppError(error) ? error.message : UI_TEXT.autoTrading.accountProbeFailed);
     } finally {
       setAccountProbeBusy(false);
-    }
-  };
-
-  const handlePlaceRealOrder = async (event: FormEvent) => {
-    event.preventDefault();
-    const symbol = realOrderSymbol.trim().toUpperCase();
-    const quantity = Number(realOrderQty);
-    const price = Number(realOrderPrice.replace(",", "."));
-    if (!symbol || symbol.length > 20) {
-      setRealOrderMessage("Ma khong hop le.");
-      return;
-    }
-    if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isInteger(quantity)) {
-      setRealOrderMessage("Khoi luong phai la so nguyen duong.");
-      return;
-    }
-    if (!Number.isFinite(price) || price <= 0) {
-      setRealOrderMessage("Gia phai la so duong.");
-      return;
-    }
-    setRealOrderBusy(true);
-    setRealOrderMessage("");
-    try {
-      const response = await placeExecutionOrder({
-        account_mode: "REAL",
-        symbol,
-        side: realOrderSide,
-        quantity,
-        price,
-        risk_per_trade: 0.01,
-        nav: 100_000_000,
-        stoploss_price: realOrderSide === "BUY" ? price * 0.97 : undefined,
-        metadata: {
-          source: "fe_auto_trading_real",
-        },
-        auto_process: realAutoProcess,
-        idempotency_key: realOrderIdempotencyKey.trim() || undefined,
-      });
-      const success = Boolean((response as { success?: boolean }).success);
-      const data = (response as { data?: Record<string, unknown> }).data ?? {};
-      const orderStatus = (data as { status?: string; order?: { status?: string } }).status
-        ?? (data as { order?: { status?: string } }).order?.status
-        ?? "NEW";
-      if (!success) {
-        setRealOrderMessage(`Lenh bi tu choi: ${String(data.reason ?? "unknown")}`);
-      } else {
-        setRealOrderMessage(`Dat lenh thanh cong: ${String(orderStatus)}`);
-      }
-      await refreshRealOrders();
-    } catch (error) {
-      const message = isAppError(error) ? error.message : "Dat lenh that bai.";
-      setRealOrderMessage(message);
-    } finally {
-      setRealOrderBusy(false);
-    }
-  };
-
-  const handleProcessSelectedOrder = async (orderId: string) => {
-    try {
-      const response = await processExecutionOrder(orderId);
-      const success = Boolean((response as { success?: boolean }).success);
-      if (!success) {
-        setRealOrderMessage(`Process order that bai: ${String((response as { data?: { reason?: string } }).data?.reason ?? "unknown")}`);
-      } else {
-        setRealOrderMessage("Da process order.");
-      }
-      await refreshRealOrders();
-      await loadOrderEvents(orderId);
-    } catch (error) {
-      const message = isAppError(error) ? error.message : "Process order that bai.";
-      setRealOrderMessage(message);
     }
   };
 
@@ -1017,10 +932,6 @@ export function AutoTradingClient() {
   };
 
   const canLoadMoreHistory = demoOrders.length < historyTotal;
-  const filteredRealOrders = realOrders.filter((order) =>
-    realStatusFilter === "ALL" ? true : order.status === realStatusFilter,
-  );
-
   const handleNewDemoSession = async () => {
     setDemoSessionBusy(true);
     try {
@@ -1071,10 +982,8 @@ export function AutoTradingClient() {
       setDemoOrders([]);
       setDemoLog([]);
       setDemoPositions([]);
-      setDemoRealizedPnl(0);
       setDemoUnrealizedPnl(0);
       setDemoCash(DEMO_INITIAL_CASH_VND);
-      setDemoEquity(DEMO_INITIAL_CASH_VND);
       setDemoOverview(null);
       setDemoOverviewError("");
       setDemoPortfolioSnapshot({
@@ -1103,7 +1012,6 @@ export function AutoTradingClient() {
     try {
       const updated = await toggleScheduler(schedulerAccountMode, !schedulerStatus.enabled);
       setSchedulerStatus(updated);
-      await loadSchedulerStateRows();
       await loadAutomationRuns();
     } catch (error) {
       setSchedulerError(isAppError(error) ? error.message : "Khong toggle duoc auto trading.");
@@ -1273,65 +1181,70 @@ export function AutoTradingClient() {
             <p className="mt-3 text-xs text-slate-500">
               {sessionActive ? UI_TEXT.dnse.sessionActive : UI_TEXT.dnse.sessionNone}
             </p>
-            <div className="mt-4 grid gap-4 md:grid-cols-2">
-              <div className="flex flex-col gap-2">
-                <label className="text-xs font-medium text-slate-400" htmlFor="at-dnse-user">
-                  {UI_TEXT.dnse.credentialsSection}
-                </label>
-                <input
-                  id="at-dnse-user"
-                  className="rounded-md border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100"
-                  autoComplete="username"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  placeholder={UI_TEXT.dnse.usernamePlaceholder}
-                />
-                <input
-                  className="rounded-md border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100"
-                  type="password"
-                  autoComplete="current-password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder={UI_TEXT.dnse.passwordPlaceholder}
-                />
-                <div className="flex flex-wrap gap-2 pt-1">
+            {!sessionActive ? (
+              <div className="mt-4 grid gap-4 md:grid-cols-2">
+                <div className="flex flex-col gap-2">
+                  <label className="text-xs font-medium text-slate-400" htmlFor="at-dnse-user">
+                    {UI_TEXT.dnse.credentialsSection}
+                  </label>
+                  <input
+                    id="at-dnse-user"
+                    className="rounded-md border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100"
+                    autoComplete="username"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    placeholder={UI_TEXT.dnse.usernamePlaceholder}
+                  />
+                  <input
+                    className="rounded-md border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100"
+                    type="password"
+                    autoComplete="current-password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder={UI_TEXT.dnse.passwordPlaceholder}
+                  />
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => void handleDnseLogin()}
+                      disabled={sessionBusy}
+                      className="rounded-md bg-cyan-300/20 px-3 py-2 text-xs font-semibold text-cyan-50 disabled:opacity-50"
+                    >
+                      {sessionBusy ? UI_TEXT.dnse.sessionLoggingIn : UI_TEXT.dnse.sessionLogin}
+                    </button>
+                  </div>
+                </div>
+                <div className="flex flex-col gap-2">
+                  <label className="text-xs font-medium text-slate-400" htmlFor="at-dnse-token">
+                    {UI_TEXT.autoTrading.tokenPasteLabel}
+                  </label>
+                  <textarea
+                    id="at-dnse-token"
+                    className="min-h-[88px] rounded-md border border-white/15 bg-black/30 px-3 py-2 font-mono text-xs text-slate-100"
+                    value={tokenInput}
+                    onChange={(e) => setTokenInput(e.target.value)}
+                    placeholder={UI_TEXT.autoTrading.tokenPastePlaceholder}
+                  />
                   <button
                     type="button"
-                    onClick={() => void handleDnseLogin()}
-                    disabled={sessionBusy}
-                    className="rounded-md bg-cyan-300/20 px-3 py-2 text-xs font-semibold text-cyan-50 disabled:opacity-50"
+                    onClick={handleApplyToken}
+                    className="self-start rounded-md border border-cyan-300/40 px-3 py-2 text-xs font-semibold text-cyan-100"
                   >
-                    {sessionBusy ? UI_TEXT.dnse.sessionLoggingIn : UI_TEXT.dnse.sessionLogin}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleDnseLogout}
-                    className="rounded-md border border-white/15 px-3 py-2 text-xs font-semibold text-slate-200"
-                  >
-                    {UI_TEXT.dnse.sessionLogout}
+                    {UI_TEXT.autoTrading.tokenApply}
                   </button>
                 </div>
               </div>
-              <div className="flex flex-col gap-2">
-                <label className="text-xs font-medium text-slate-400" htmlFor="at-dnse-token">
-                  {UI_TEXT.autoTrading.tokenPasteLabel}
-                </label>
-                <textarea
-                  id="at-dnse-token"
-                  className="min-h-[88px] rounded-md border border-white/15 bg-black/30 px-3 py-2 font-mono text-xs text-slate-100"
-                  value={tokenInput}
-                  onChange={(e) => setTokenInput(e.target.value)}
-                  placeholder={UI_TEXT.autoTrading.tokenPastePlaceholder}
-                />
+            ) : (
+              <div className="mt-4 flex items-center">
                 <button
                   type="button"
-                  onClick={handleApplyToken}
-                  className="self-start rounded-md border border-cyan-300/40 px-3 py-2 text-xs font-semibold text-cyan-100"
+                  onClick={handleDnseLogout}
+                  className="rounded-md border border-white/15 px-3 py-2 text-xs font-semibold text-slate-200"
                 >
-                  {UI_TEXT.autoTrading.tokenApply}
+                  {UI_TEXT.dnse.sessionLogout}
                 </button>
               </div>
-            </div>
+            )}
             <div className="mt-4 border-t border-white/10 pt-4">
               <button
                 type="button"
@@ -1344,249 +1257,181 @@ export function AutoTradingClient() {
               {accountProbeMessage ? (
                 <p className="mt-2 text-xs text-slate-400">{accountProbeMessage}</p>
               ) : null}
-            </div>
-          </section>
-
-          <section className="glass-panel rounded-2xl p-6">
-            <h2 className="text-lg font-semibold text-slate-100">{UI_TEXT.autoTrading.searchTitle}</h2>
-            <p className="mt-2 text-xs text-slate-400">{UI_TEXT.autoTrading.searchDescription}</p>
-            {symbolsLoadState === "error" ? (
-              <p className="mt-4 text-sm text-rose-300">{symbolsError}</p>
-            ) : null}
-            {symbolsLoadState === "loading" ? (
-              <p className="mt-4 text-sm text-slate-400">{UI_TEXT.autoTrading.symbolsLoading}</p>
-            ) : null}
-            <input
-              className="mt-4 w-full max-w-md rounded-md border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100"
-              value={tickerInput}
-              onChange={(e) => setTickerInput(e.target.value.toUpperCase())}
-              placeholder={UI_TEXT.autoTrading.searchPlaceholder}
-              disabled={symbolsLoadState !== "ready"}
-            />
-            <p className="mt-2 text-xs text-slate-500">
-              {searchBusy ? UI_TEXT.autoTrading.searchLoadingQuotes : searchMessage}
-            </p>
-            {searchRows.length > 0 ? (
-              <div className="mt-4 overflow-x-auto">
-                <table className="w-full min-w-[480px] text-left text-sm text-slate-200">
-                  <thead className="border-b border-white/10 text-xs uppercase text-slate-500">
-                    <tr>
-                      <th className="py-2 pr-3">{UI_TEXT.market.table.symbol}</th>
-                      <th className="py-2 pr-3">{UI_TEXT.market.table.exchange}</th>
-                      <th className="py-2 pr-3">{UI_TEXT.autoTrading.colPrice}</th>
-                      <th className="py-2 pr-3">{UI_TEXT.autoTrading.colChange}</th>
-                      <th className="py-2">{UI_TEXT.market.table.action}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {searchRows.map((row) => (
-                      <tr key={row.symbol} className="border-b border-white/5">
-                        <td className="py-2 pr-3 font-mono font-medium">{row.symbol}</td>
-                        <td className="py-2 pr-3 text-slate-400">{row.exchange ?? "-"}</td>
-                        <td className="py-2 pr-3">
-                          {row.quoteError || row.lastPrice === undefined ? (
-                            <span className="text-slate-500">-</span>
-                          ) : (
-                            formatPrice(row.lastPrice)
-                          )}
-                        </td>
-                        <td className="py-2 pr-3">{formatPct(row.changePercent)}</td>
-                        <td className="py-2">
-                          <div className="flex flex-wrap gap-2">
-                            <button
-                              type="button"
-                              className="rounded-md border border-white/15 px-2 py-1 text-xs text-slate-200"
-                              onClick={() => setSelectedSymbol(row.symbol)}
-                            >
-                              {UI_TEXT.autoTrading.viewOverview}
-                            </button>
-                            <Link
-                              href={`/symbol/${encodeURIComponent(row.symbol)}`}
-                              className="rounded-md border border-cyan-300/30 px-2 py-1 text-xs text-cyan-100"
-                            >
-                              {UI_TEXT.market.table.viewDetail}
-                            </Link>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : null}
-
-            {selectedSymbol ? (
-              <div className="mt-6 rounded-xl border border-white/10 bg-black/20 p-4">
-                <div className="flex items-center justify-between gap-2">
-                  <h3 className="text-sm font-semibold text-slate-100">
-                    {UI_TEXT.autoTrading.overviewTitle(selectedSymbol)}
-                  </h3>
-                  <button
-                    type="button"
-                    className="text-xs text-slate-500 hover:text-slate-300"
-                    onClick={() => setSelectedSymbol(null)}
-                  >
-                    {UI_TEXT.autoTrading.clearSelection}
-                  </button>
-                </div>
-                {overviewBusy ? (
-                  <p className="mt-2 text-xs text-slate-400">{UI_TEXT.autoTrading.overviewLoading}</p>
-                ) : null}
-                {overviewError ? <p className="mt-2 text-xs text-rose-300">{overviewError}</p> : null}
-                {overview ? (
-                  <dl className="mt-3 grid gap-2 text-xs text-slate-300 md:grid-cols-2">
-                    <div>
-                      <dt className="text-slate-500">{UI_TEXT.autoTrading.companyName}</dt>
-                      <dd>{overview.company_name ?? UI_TEXT.symbol.fallbackCompanyName}</dd>
-                    </div>
-                    <div>
-                      <dt className="text-slate-500">{UI_TEXT.symbol.exchange}</dt>
-                      <dd>{overview.exchange ?? "-"}</dd>
-                    </div>
-                    <div>
-                      <dt className="text-slate-500">{UI_TEXT.symbol.industry}</dt>
-                      <dd>{overview.industry ?? "-"}</dd>
-                    </div>
-                    <div>
-                      <dt className="text-slate-500">{UI_TEXT.symbol.marketCap}</dt>
-                      <dd>
-                        {overview.market_cap != null ? formatVnd(overview.market_cap) : "-"}
-                      </dd>
-                    </div>
-                  </dl>
-                ) : null}
-              </div>
-            ) : null}
-          </section>
-
-          <section className="glass-panel rounded-2xl p-6">
-            <h2 className="text-lg font-semibold text-slate-100">Real execution (Risk + T+2 guard)</h2>
-            <p className="mt-2 text-xs text-slate-400">
-              Lenh se di qua `/execution/place`, BUY qua risk check va SELL qua settlement guard.
-            </p>
-            <form className="mt-4 grid gap-3 md:grid-cols-2 lg:grid-cols-4" onSubmit={handlePlaceRealOrder}>
-              <input
-                className="rounded-md border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100"
-                value={realOrderSymbol}
-                onChange={(e) => setRealOrderSymbol(e.target.value.toUpperCase())}
-                placeholder="Ma"
-              />
-              <select
-                className="rounded-md border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100"
-                value={realOrderSide}
-                onChange={(e) => setRealOrderSide(e.target.value as "BUY" | "SELL")}
-              >
-                <option value="BUY">BUY</option>
-                <option value="SELL">SELL</option>
-              </select>
-              <input
-                className="rounded-md border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100"
-                value={realOrderQty}
-                onChange={(e) => setRealOrderQty(e.target.value)}
-                placeholder="Khoi luong"
-              />
-              <input
-                className="rounded-md border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100"
-                value={realOrderPrice}
-                onChange={(e) => setRealOrderPrice(e.target.value)}
-                placeholder="Gia"
-              />
-              <input
-                className="rounded-md border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100"
-                value={realOrderIdempotencyKey}
-                onChange={(e) => setRealOrderIdempotencyKey(e.target.value)}
-                placeholder="Idempotency key (optional)"
-              />
-              <label className="flex items-center gap-2 rounded-md border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100">
-                <input
-                  type="checkbox"
-                  checked={realAutoProcess}
-                  onChange={(e) => setRealAutoProcess(e.target.checked)}
-                />
-                Auto process
-              </label>
-              <div className="md:col-span-2 lg:col-span-4">
-                <button
-                  type="submit"
-                  disabled={realOrderBusy}
-                  className="rounded-md bg-cyan-300/20 px-4 py-2 text-sm font-semibold text-cyan-50 disabled:opacity-50"
-                >
-                  {realOrderBusy ? "Dang gui lenh..." : "Dat lenh Real"}
-                </button>
-              </div>
-            </form>
-            {realOrderMessage ? <p className="mt-3 text-xs text-slate-300">{realOrderMessage}</p> : null}
-            <div className="mt-3 flex items-center gap-2">
-              <label className="text-xs text-slate-400">Filter status:</label>
-              <select
-                className="rounded border border-white/15 bg-black/30 px-2 py-1 text-xs text-slate-200"
-                value={realStatusFilter}
-                onChange={(e) => setRealStatusFilter(e.target.value as "ALL" | OrderStatus)}
-              >
-                <option value="ALL">ALL</option>
-                <option value="NEW">NEW</option>
-                <option value="SENT">SENT</option>
-                <option value="ACK">ACK</option>
-                <option value="FILLED">FILLED</option>
-                <option value="REJECTED">REJECTED</option>
-                <option value="CANCELLED">CANCELLED</option>
-              </select>
-            </div>
-            <div className="mt-4 max-h-56 overflow-y-auto rounded-md border border-white/10 p-3 text-xs text-slate-300">
-              {filteredRealOrders.length === 0 ? (
-                <p className="text-slate-500">Chua co lenh.</p>
-              ) : (
-                filteredRealOrders.map((order) => (
-                  <div key={order.id} className="border-b border-white/5 py-2 font-mono">
-                    <div>
-                      {order.created_at} {order.side} {order.quantity} {order.symbol} @ {formatPrice(order.price)} |{" "}
-                      <span className={statusClass(order.status)}>{order.status}</span>
-                      {order.reason ? ` (${order.reason})` : ""}
-                    </div>
-                    <div className="mt-1 flex flex-wrap gap-2">
-                      <button
-                        type="button"
-                        className="rounded border border-white/20 px-2 py-1 text-[10px]"
-                        onClick={() => {
-                          setSelectedOrderId(order.id);
-                          void loadOrderEvents(order.id);
-                        }}
+              {sessionActive && dnseAccountSummary ? (
+                <div className="mt-3 space-y-3">
+                  <div className="rounded-md border border-white/10 bg-black/20 p-2">
+                    <p className="text-[11px] text-slate-500">Chu tai khoan</p>
+                    <p className="font-semibold text-cyan-100">{dnseAccountSummary.accountName || "-"}</p>
+                  </div>
+                  <div className="grid gap-2 text-xs text-slate-300 md:grid-cols-4">
+                    <div className="rounded-md border border-emerald-300/25 bg-emerald-300/10 p-2">
+                      <p className="text-[11px] text-emerald-200/80">Cash hien tai</p>
+                      <p
+                        className={`font-semibold ${
+                          dnseAccountSummary.depositedAmount != null &&
+                          dnseAccountSummary.cashCurrent != null &&
+                          dnseAccountSummary.cashCurrent < dnseAccountSummary.depositedAmount
+                            ? "text-rose-200"
+                            : "text-emerald-100"
+                        }`}
                       >
-                        Xem events
-                      </button>
-                      {["NEW", "SENT", "ACK"].includes(order.status) ? (
-                        <button
-                          type="button"
-                          className="rounded border border-cyan-300/40 px-2 py-1 text-[10px] text-cyan-100"
-                          onClick={() => void handleProcessSelectedOrder(order.id)}
-                        >
-                          Process
-                        </button>
-                      ) : null}
+                        {(() => {
+                          if (dnseAccountSummary.cashCurrent == null) {
+                            return "-";
+                          }
+                          const cashText = `${formatVnd(dnseAccountSummary.cashCurrent)} VND`;
+                          if (dnseAccountSummary.depositedAmount == null || dnseAccountSummary.depositedAmount <= 0) {
+                            return cashText;
+                          }
+                          const diff = dnseAccountSummary.cashCurrent - dnseAccountSummary.depositedAmount;
+                          const pct = (diff / dnseAccountSummary.depositedAmount) * 100;
+                          const sign = pct > 0 ? "+" : "";
+                          return `${cashText} (${sign}${pct.toFixed(2)}%)`;
+                        })()}
+                      </p>
+                    </div>
+                    <div className="rounded-md border border-cyan-300/25 bg-cyan-300/10 p-2">
+                      <p className="text-[11px] text-cyan-200/80">So tien nap vao</p>
+                      <p className="font-semibold text-cyan-100">
+                        {dnseAccountSummary.depositedAmount != null
+                          ? `${formatVnd(dnseAccountSummary.depositedAmount)} VND`
+                          : "Khong co du lieu initialBalance"}
+                      </p>
+                    </div>
+                    <div className="rounded-md border border-amber-300/25 bg-amber-300/10 p-2">
+                      <p className="text-[11px] text-amber-100/80">Cash kha dung de trading</p>
+                      <p className="font-semibold text-amber-200">
+                        {dnseAccountSummary.tradableCash != null
+                          ? `${formatVnd(dnseAccountSummary.tradableCash)} VND`
+                          : "-"}
+                      </p>
+                    </div>
+                    <div className="rounded-md border border-cyan-300/25 bg-cyan-300/10 p-2">
+                      <p className="text-[11px] text-cyan-200/80">Ma dang nam giu</p>
+                      <p className="font-semibold text-cyan-100">{dnseAccountSummary.holdings.length}</p>
                     </div>
                   </div>
-                ))
-              )}
-            </div>
-            {selectedOrderId ? (
-              <div className="mt-3 rounded-md border border-white/10 p-3 text-xs text-slate-300">
-                <p className="font-semibold">Order events: {selectedOrderId}</p>
-                {orderEventsBusy ? (
-                  <p className="mt-2 text-slate-500">Dang tai events...</p>
-                ) : selectedOrderEvents.length === 0 ? (
-                  <p className="mt-2 text-slate-500">Chua co event.</p>
-                ) : (
-                  <div className="mt-2 space-y-1 font-mono">
-                    {selectedOrderEvents.map((event) => (
-                      <div key={event.id}>
-                        {event.created_at} [{event.status}] {event.message ?? ""}
+                  <div className="rounded-md border border-white/10 bg-black/20 p-2">
+                    <p className="text-[11px] text-slate-500">Sub-accounts</p>
+                    <p className="font-mono text-[11px] text-emerald-200">
+                      {dnseAccountSummary.subAccounts.length > 0 ? dnseAccountSummary.subAccounts.join(", ") : "-"}
+                    </p>
+                  </div>
+                  <div className="rounded-md border border-white/10 bg-black/20 p-2">
+                    <p className="mb-2 text-[11px] text-slate-400">Danh muc dang nam giu</p>
+                    {dnseAccountSummary.holdings.length === 0 ? (
+                      <p className="text-[11px] text-slate-500">Khong co vi the co phieu hoac DNSE khong tra ve du lieu holdings.</p>
+                    ) : (
+                      <div className="max-h-48 overflow-y-auto overflow-x-auto">
+                        <table className="w-full min-w-[520px] text-left text-[11px] text-slate-200">
+                          <thead className="border-b border-white/10 text-slate-500">
+                            <tr>
+                              <th className="py-1.5 pr-3">Symbol</th>
+                              <th className="py-1.5 pr-3">Qty</th>
+                              <th className="py-1.5 pr-3">Avg</th>
+                              <th className="py-1.5">Market</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {dnseAccountSummary.holdings.map((row) => (
+                              <tr key={row.symbol} className="border-b border-white/5">
+                                <td className="py-1.5 pr-3 font-mono text-cyan-100">{row.symbol}</td>
+                                <td className="py-1.5 pr-3">{row.quantity}</td>
+                                <td className="py-1.5 pr-3">{row.averagePrice != null ? formatPrice(row.averagePrice) : "-"}</td>
+                                <td className="py-1.5">{row.marketPrice != null ? formatPrice(row.marketPrice) : "-"}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
                       </div>
-                    ))}
+                    )}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </section>
+
+          <section className="glass-panel rounded-2xl p-6">
+            <h3 className="text-sm font-semibold text-slate-200">
+              Liquidity Cache Picks (eligible_spike=true + eligible_liquidity=true)
+            </h3>
+            {liquidityEligibleError ? <p className="mt-2 text-xs text-rose-300">{liquidityEligibleError}</p> : null}
+            {liquidityEligibleRows.length === 0 ? (
+              <p className="mt-3 text-xs text-slate-500">Chua co ma dat du ca 2 dieu kien trong Redis cache.</p>
+            ) : (
+              <div className="mt-3 space-y-3 text-xs text-slate-300">
+                <p className="text-slate-400">
+                  Tong so ma dat chuan: <span className="font-semibold text-cyan-200">{liquidityEligibleTotal}</span>
+                </p>
+                <div className="max-h-80 overflow-y-auto overflow-x-auto rounded-md border border-white/10">
+                  <table className="w-full min-w-[760px] text-left text-xs text-slate-200">
+                    <thead className="border-b border-white/10 uppercase tracking-wide text-slate-500">
+                      <tr>
+                        <th className="py-2.5 pr-4 whitespace-nowrap">Symbol</th>
+                        <th className="py-2.5 pr-4 whitespace-nowrap">Exchange</th>
+                        <th className="py-2.5 pr-4 whitespace-nowrap">Spike ratio</th>
+                        <th className="py-2.5 pr-4 whitespace-nowrap">Baseline vol</th>
+                        <th className="py-2.5 pr-4 whitespace-nowrap">Latest vol</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {liquidityEligibleRows.map((row) => (
+                        <tr key={row.redis_key} className="border-b border-white/5 align-top">
+                          <td className="py-2 pr-3 font-mono text-cyan-200">{row.symbol}</td>
+                          <td className="py-2 pr-3 text-slate-300">{row.exchange}</td>
+                          <td className="py-2 pr-3 text-emerald-300">{Number(row.spike_ratio || 0).toFixed(2)}x</td>
+                          <td className="py-2 pr-3 text-slate-100">{formatVnd(Number(row.baseline_vol || 0))}</td>
+                          <td className="py-2 pr-3 text-slate-100">{formatVnd(Number(row.latest_vol || 0))}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </section>
+
+          <section className="glass-panel rounded-2xl p-6">
+            <h3 className="text-sm font-semibold text-slate-200">Mail Signals</h3>
+            {mailSignalsError ? <p className="mt-2 text-xs text-rose-300">{mailSignalsError}</p> : null}
+            {!mailSignals ? (
+              <p className="mt-3 text-xs text-slate-500">Chua co du lieu mail signal.</p>
+            ) : (
+              <div className="mt-3 space-y-3 text-xs text-slate-300">
+                {mailSignals.items.length === 0 ? (
+                  <p className="text-slate-500">Khong co ma mua hop le tu mail gan nhat.</p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[760px] text-left text-xs text-slate-200">
+                      <thead className="border-b border-white/10 uppercase tracking-wide text-slate-500">
+                        <tr>
+                          <th className="py-2.5 pr-4 whitespace-nowrap">Symbol</th>
+                          <th className="py-2.5 pr-4 whitespace-nowrap">Entry</th>
+                          <th className="py-2.5 pr-4 whitespace-nowrap">Take profit</th>
+                          <th className="py-2.5 pr-4 whitespace-nowrap">Stop loss</th>
+                          <th className="py-2.5 pr-4 whitespace-nowrap">Confidence</th>
+                          <th className="py-2.5 whitespace-nowrap">Reason</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {mailSignals.items.map((item, idx) => (
+                          <tr key={`${item.symbol}-${idx}`} className="border-b border-white/5 align-top">
+                            <td className="py-2 pr-3 font-mono text-cyan-200">{item.symbol}</td>
+                            <td className="py-2 pr-3 text-slate-100">{formatPrice(item.entry)}</td>
+                            <td className="py-2 pr-3 text-emerald-300">{formatPrice(item.take_profit)}</td>
+                            <td className="py-2 pr-3 text-rose-300">{formatPrice(item.stop_loss)}</td>
+                            <td className="py-2 pr-3 text-amber-300">{(Number(item.confidence || 0) * 100).toFixed(0)}%</td>
+                            <td className="py-2">{item.reason || "-"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 )}
               </div>
-            ) : null}
+            )}
           </section>
+
         </div>
       ) : (
         <div className="flex flex-col gap-8">
@@ -1648,10 +1493,9 @@ export function AutoTradingClient() {
                 <p className="mt-1 text-[11px] text-slate-500">{UI_TEXT.autoTrading.demoSessionListLoading}</p>
               ) : null}
             </div>
-            <div className="mt-3 grid gap-2 text-xs text-slate-400 md:grid-cols-3">
+            <div className="mt-3 grid gap-2 text-xs text-slate-400 md:grid-cols-2">
               <p>Session: {demoSessionId}</p>
-              <p>Realized PnL: {formatVnd(demoRealizedPnl)} VND</p>
-              <p>Equity: {formatVnd(demoEquity)} VND</p>
+              <p>Updated account snapshot: {formatVnd(demoCash)} VND</p>
             </div>
             <div className="mt-4 rounded-md border border-white/10 bg-black/20 p-3 text-xs text-slate-300">
               <p className="font-semibold text-slate-200">Demo DB Overview</p>
@@ -1659,12 +1503,6 @@ export function AutoTradingClient() {
               {demoOverview ? (
                 <div className="mt-3 space-y-3">
                   <div className="grid gap-2 md:grid-cols-3">
-                    <div className="rounded-md border border-cyan-300/25 bg-cyan-300/10 p-3">
-                      <p className="text-[11px] uppercase tracking-wide text-cyan-100/80">Tong tai san hien tai</p>
-                      <p className="mt-1 text-lg font-semibold text-cyan-50">
-                        {formatVnd(demoPortfolioSnapshot.totalAssets)} VND
-                      </p>
-                    </div>
                     <div className="rounded-md border border-emerald-300/25 bg-emerald-300/10 p-3">
                       <p className="text-[11px] uppercase tracking-wide text-emerald-100/80">Tien mat con du</p>
                       <p className="mt-1 text-lg font-semibold text-emerald-50">
@@ -1677,15 +1515,50 @@ export function AutoTradingClient() {
                         {formatVnd(demoPortfolioSnapshot.stockValue)} VND
                       </p>
                     </div>
+                    <div className="rounded-md border border-cyan-300/20 bg-cyan-300/5 p-3">
+                      <p className="text-[11px] uppercase tracking-wide text-cyan-100/80">Realized PnL</p>
+                      <p
+                        className={`mt-1 text-lg font-semibold ${
+                          Number(demoOverview.realized_pnl || 0) >= 0 ? "text-emerald-200" : "text-rose-200"
+                        }`}
+                      >
+                        {formatVnd(Number(demoOverview.realized_pnl || 0))} VND
+                      </p>
+                    </div>
+                  </div>
+                  <div className="grid gap-2 md:grid-cols-3">
+                    <div className="rounded-md border border-slate-300/20 bg-slate-300/10 p-3">
+                      <p className="text-[11px] uppercase tracking-wide text-slate-200/80">Tong von ban dau</p>
+                      <p className="mt-1 text-lg font-semibold text-slate-100">
+                        {formatVnd(Number(demoOverview.initial_balance || 0))} VND
+                      </p>
+                    </div>
+                    <div className="rounded-md border border-cyan-300/20 bg-cyan-300/5 p-3">
+                      <p className="text-[11px] uppercase tracking-wide text-cyan-100/80">Tong von hien tai</p>
+                      <p className="mt-1 text-lg font-semibold text-cyan-100">
+                        {formatVnd(Number(demoPortfolioSnapshot.totalAssets || 0))} VND
+                      </p>
+                    </div>
+                    <div className="rounded-md border border-amber-300/20 bg-amber-300/5 p-3">
+                      <p className="text-[11px] uppercase tracking-wide text-amber-100/80">Chenh lech lai/lo</p>
+                      <p
+                        className={`mt-1 text-lg font-semibold ${
+                          Number(demoPortfolioSnapshot.totalAssets || 0) - Number(demoOverview.initial_balance || 0) >= 0
+                            ? "text-emerald-200"
+                            : "text-rose-200"
+                        }`}
+                      >
+                        {formatVnd(
+                          Number(demoPortfolioSnapshot.totalAssets || 0) - Number(demoOverview.initial_balance || 0),
+                        )}{" "}
+                        VND
+                      </p>
+                    </div>
                   </div>
                   <div className="space-y-1">
                   <p>
                     Active: {demoOverview.is_active ? "true" : "false"} | Trades: {demoOverview.trade_count} | Holdings:{" "}
                     {demoOverview.holdings_count}
-                  </p>
-                  <p>
-                    Cash: {formatVnd(demoOverview.cash_balance)} VND | Realized: {formatVnd(demoOverview.realized_pnl)}{" "}
-                    VND
                   </p>
                   <p>Updated: {formatDateTime(demoOverview.updated_at)}</p>
                   </div>
@@ -1799,6 +1672,97 @@ export function AutoTradingClient() {
             </div>
           </section>
 
+          <section className="glass-panel rounded-2xl p-6">
+            <h3 className="text-sm font-semibold text-slate-200">Strategy Cash Operations</h3>
+            <div className="mt-3 rounded-md border border-white/10 bg-black/25 p-3 text-xs text-slate-300">
+              <p className="mb-2 text-xs font-semibold text-slate-300">Transfer and allocate strategy cash</p>
+              <div className="mb-3 flex flex-wrap items-end gap-2">
+                <label className="flex flex-col gap-1 text-[11px] text-slate-400">
+                  To strategy
+                  <select
+                    className="rounded-md border border-white/15 bg-black/30 px-2 py-1.5 font-mono text-xs text-slate-100"
+                    value={strategyCashTransferTarget}
+                    onChange={(e) =>
+                      setStrategyCashTransferTarget(e.target.value as "SHORT_TERM" | "MAIL_SIGNAL" | "UNALLOCATED")
+                    }
+                    disabled={strategyCashTransferBusy}
+                  >
+                    <option value="SHORT_TERM">SHORT_TERM</option>
+                    <option value="MAIL_SIGNAL">MAIL_SIGNAL</option>
+                    <option value="UNALLOCATED">UNALLOCATED (Nap tu ben ngoai)</option>
+                  </select>
+                </label>
+                <label className="flex flex-col gap-1 text-[11px] text-slate-400">
+                  Amount (VND)
+                  <input
+                    type="number"
+                    min={0}
+                    step="1000"
+                    className="w-48 rounded-md border border-white/15 bg-black/30 px-2 py-1.5 text-xs text-slate-100"
+                    value={strategyCashTransferAmount}
+                    onChange={(e) => setStrategyCashTransferAmount(e.target.value)}
+                    disabled={strategyCashTransferBusy}
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={() => void handleTransferUnallocatedCash()}
+                  disabled={strategyCashTransferBusy}
+                  className="rounded-md border border-cyan-300/40 px-3 py-2 text-xs font-semibold text-cyan-100 disabled:opacity-50"
+                >
+                  {strategyCashTransferBusy ? "Dang chuyen..." : "Them tien tu UNALLOCATED"}
+                </button>
+              </div>
+              <div className="mb-3 flex flex-wrap items-end gap-2">
+                <label className="flex flex-col gap-1 text-[11px] text-slate-400">
+                  From strategy
+                  <select
+                    className="rounded-md border border-white/15 bg-black/30 px-2 py-1.5 font-mono text-xs text-slate-100"
+                    value={strategyCashWithdrawSource}
+                    onChange={(e) => setStrategyCashWithdrawSource(e.target.value as "SHORT_TERM" | "MAIL_SIGNAL")}
+                    disabled={strategyCashTransferBusy}
+                  >
+                    <option value="SHORT_TERM">SHORT_TERM</option>
+                    <option value="MAIL_SIGNAL">MAIL_SIGNAL</option>
+                  </select>
+                </label>
+                <label className="flex flex-col gap-1 text-[11px] text-slate-400">
+                  Withdraw amount (VND)
+                  <input
+                    type="number"
+                    min={0}
+                    step="1000"
+                    className="w-48 rounded-md border border-white/15 bg-black/30 px-2 py-1.5 text-xs text-slate-100"
+                    value={strategyCashWithdrawAmount}
+                    onChange={(e) => setStrategyCashWithdrawAmount(e.target.value)}
+                    disabled={strategyCashTransferBusy}
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={() => void handleWithdrawToUnallocated()}
+                  disabled={strategyCashTransferBusy}
+                  className="rounded-md border border-amber-300/40 px-3 py-2 text-xs font-semibold text-amber-100 disabled:opacity-50"
+                >
+                  {strategyCashTransferBusy ? "Dang rut..." : "Rut ve UNALLOCATED"}
+                </button>
+              </div>
+              <div className="grid gap-2 md:grid-cols-3">
+                {(demoOverview?.strategy_cash_overview || []).map((row) => (
+                  <div key={row.strategy_code} className="rounded-md border border-white/10 bg-black/20 p-2">
+                    <p className="text-[11px] uppercase tracking-wide text-slate-400">{row.strategy_code}</p>
+                    <p className="mt-1 text-sm font-semibold text-cyan-100">{formatVnd(Number(row.cash_value || 0))} VND</p>
+                    <p className="text-[11px] text-slate-500">Alloc: {(Number(row.allocation_pct || 0) * 100).toFixed(1)}%</p>
+                    <p className="text-[11px] text-amber-300">Used: {formatVnd(Number(row.used_cash_value || 0))} VND</p>
+                    <p className="text-[11px] text-emerald-300">
+                      Remaining: {formatVnd(Number(row.remaining_cash_value || 0))} VND
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+
           {schedulerError ? <p className="text-xs text-rose-300">{schedulerError}</p> : null}
           <section className="glass-panel rounded-2xl p-6">
             <h3 className="text-sm font-semibold text-slate-200">
@@ -1812,7 +1776,7 @@ export function AutoTradingClient() {
                 <p className="text-slate-400">
                   Tong so ma dat chuan: <span className="font-semibold text-cyan-200">{liquidityEligibleTotal}</span>
                 </p>
-                <div className="overflow-x-auto">
+                <div className="max-h-80 overflow-y-auto overflow-x-auto rounded-md border border-white/10">
                   <table className="w-full min-w-[760px] text-left text-xs text-slate-200">
                     <thead className="border-b border-white/10 uppercase tracking-wide text-slate-500">
                       <tr>
@@ -1873,6 +1837,19 @@ export function AutoTradingClient() {
                   | dynamic_floor_skip: {scannerHealth.totalDynamicFloorSkip} | dynamic_floor:{" "}
                   <span className={scannerHealthFlags?.isDynamicFloorHigh ? "text-rose-300" : "text-slate-300"}>
                     {scannerHealth.avgDynamicFloor != null ? scannerHealth.avgDynamicFloor.toFixed(1) : "-"}
+                  </span>
+                </p>
+                <p>
+                  threshold_source: claude{" "}
+                  <span className="text-cyan-200">{scannerHealth.totalThresholdSourceClaude}</span> | heuristic{" "}
+                  <span className="text-slate-300">{scannerHealth.totalThresholdSourceHeuristic}</span>
+                </p>
+                <p>
+                  spend plan/actual:{" "}
+                  <span className="text-violet-300">{scannerHealth.totalPlannedSpent.toLocaleString("vi-VN")}</span> /{" "}
+                  <span className="text-emerald-300">{scannerHealth.totalActualSpent.toLocaleString("vi-VN")}</span> | gap{" "}
+                  <span className="text-amber-300">
+                    {(scannerHealth.totalPlannedSpent - scannerHealth.totalActualSpent).toLocaleString("vi-VN")}
                   </span>
                 </p>
                 {scannerHealthFlags?.hasWarning ? (
@@ -1967,13 +1944,20 @@ export function AutoTradingClient() {
                               const skippedCooldown = asFiniteNumber(detail.skipped_experience_cooldown);
                               const skippedDynamicFloor = asFiniteNumber(detail.skipped_dynamic_buy_floor);
                               const dynamicFloor = asFiniteNumber(detail.dynamic_buy_composite_floor);
+                              const thresholdSourceClaude = asFiniteNumber(detail.experience_threshold_source_claude);
+                              const thresholdSourceHeuristic = asFiniteNumber(detail.experience_threshold_source_heuristic);
                               const decisionMeta = (detail.buy_decision_meta ?? {}) as Record<string, unknown>;
                               const decisionSource = typeof decisionMeta.source === "string" ? decisionMeta.source : "-";
+                              const plannedSpent = asFiniteNumber(decisionMeta.planned_spent);
+                              const actualSpent = asFiniteNumber(decisionMeta.actual_spent);
+                              const executionGap = asFiniteNumber(decisionMeta.execution_spent_gap);
                               return [
                                 `entry_gate_skip=${skippedEntryGate ?? 0}`,
                                 `cooldown_skip=${skippedCooldown ?? 0}`,
                                 `dynamic_floor_skip=${skippedDynamicFloor ?? 0}`,
                                 `dynamic_floor=${dynamicFloor != null ? dynamicFloor.toFixed(1) : "-"}`,
+                                `threshold_source=claude:${thresholdSourceClaude ?? 0}/heuristic:${thresholdSourceHeuristic ?? 0}`,
+                                `spent(plan/actual/gap)=${plannedSpent ?? 0}/${actualSpent ?? 0}/${executionGap ?? 0}`,
                                 `decision=${decisionSource}`,
                               ].join(" | ");
                             })()}

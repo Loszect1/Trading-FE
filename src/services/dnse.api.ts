@@ -28,7 +28,7 @@ export async function dnseAuthLogin(username?: string, password?: string): Promi
   try {
     const payload: Record<string, string> = {};
     const u = (username ?? "").trim();
-    const p = password ?? "";
+    const p = (password ?? "").trim();
     if (u) payload.username = u;
     if (p) payload.password = p;
 
