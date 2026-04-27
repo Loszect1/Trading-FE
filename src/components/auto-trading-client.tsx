@@ -158,6 +158,11 @@ function formatDateTime(iso: string): string {
   return d.toLocaleString("vi-VN", { hour12: false });
 }
 
+function asFiniteNumber(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 const DEMO_SESSION_STORAGE_KEY = "auto_trading_demo_session_id";
 
 function getStoredDemoSessionId(): string {
@@ -363,6 +368,78 @@ export function AutoTradingClient() {
       }))
       .filter((g) => g.runs.length > 0);
   }, [automationLogScopeFilter, automationRuns, demoSessionId, schedulerAccountMode]);
+
+  const scannerHealth = useMemo(() => {
+    const scopedRuns = automationRuns
+      .filter((run) => {
+        if (schedulerAccountMode !== "DEMO") {
+          return true;
+        }
+        const sid = String((run.detail?.demo_session_id as string | undefined) || "").trim();
+        return sid.length > 0 && sid === demoSessionId;
+      })
+      .slice(0, 10);
+    if (scopedRuns.length === 0) {
+      return null;
+    }
+    let totalScanned = 0;
+    let totalBuy = 0;
+    let totalExec = 0;
+    let totalErrors = 0;
+    let totalEntryGateSkip = 0;
+    let totalCooldownSkip = 0;
+    let totalDynamicFloorSkip = 0;
+    let dynamicFloorSum = 0;
+    let dynamicFloorCount = 0;
+    for (const run of scopedRuns) {
+      totalScanned += Number(run.scanned || 0);
+      totalBuy += Number(run.buy_candidates || 0);
+      totalExec += Number(run.executed || 0);
+      totalErrors += Number(run.errors || 0);
+      const detail = run.detail ?? {};
+      const entryGate = asFiniteNumber(detail.skipped_entry_gate);
+      const cooldown = asFiniteNumber(detail.skipped_experience_cooldown);
+      const dynSkip = asFiniteNumber(detail.skipped_dynamic_buy_floor);
+      const dynFloor = asFiniteNumber(detail.dynamic_buy_composite_floor);
+      totalEntryGateSkip += entryGate ?? 0;
+      totalCooldownSkip += cooldown ?? 0;
+      totalDynamicFloorSkip += dynSkip ?? 0;
+      if (dynFloor != null) {
+        dynamicFloorSum += dynFloor;
+        dynamicFloorCount += 1;
+      }
+    }
+    const n = scopedRuns.length;
+    return {
+      sampleSize: n,
+      avgScanned: totalScanned / n,
+      avgBuy: totalBuy / n,
+      avgExecuted: totalExec / n,
+      avgErrors: totalErrors / n,
+      totalEntryGateSkip,
+      totalCooldownSkip,
+      totalDynamicFloorSkip,
+      avgDynamicFloor: dynamicFloorCount > 0 ? dynamicFloorSum / dynamicFloorCount : null,
+    };
+  }, [automationRuns, demoSessionId, schedulerAccountMode]);
+
+  const scannerHealthFlags = useMemo(() => {
+    if (!scannerHealth) {
+      return null;
+    }
+    const isErrHigh = scannerHealth.avgErrors > 0.5;
+    const isCooldownSpike = scannerHealth.totalCooldownSkip >= 5;
+    const isEntryGateTooTight = scannerHealth.totalEntryGateSkip >= 20;
+    const isDynamicFloorHigh = (scannerHealth.avgDynamicFloor ?? 0) >= 62;
+    const hasWarning = isErrHigh || isCooldownSpike || isEntryGateTooTight || isDynamicFloorHigh;
+    return {
+      hasWarning,
+      isErrHigh,
+      isCooldownSpike,
+      isEntryGateTooTight,
+      isDynamicFloorHigh,
+    };
+  }, [scannerHealth]);
 
   const overviewDonutData = useMemo(
     () => [
@@ -1763,6 +1840,48 @@ export function AutoTradingClient() {
             )}
           </section>
           <div className="rounded-md border border-white/10 bg-black/20 p-3 text-xs text-slate-300">
+            {scannerHealth ? (
+              <div
+                className={`mb-3 grid gap-2 rounded-md p-3 text-[11px] text-slate-300 md:grid-cols-4 ${
+                  scannerHealthFlags?.hasWarning
+                    ? "border border-rose-300/30 bg-rose-300/10"
+                    : "border border-cyan-300/20 bg-cyan-300/5"
+                }`}
+              >
+                <p className={`font-semibold ${scannerHealthFlags?.hasWarning ? "text-rose-200" : "text-cyan-200"}`}>
+                  Scanner Health (last {scannerHealth.sampleSize} runs)
+                </p>
+                <p>
+                  avg scan: <span className="text-violet-300">{scannerHealth.avgScanned.toFixed(1)}</span> | avg buy:{" "}
+                  <span className="text-amber-300">{scannerHealth.avgBuy.toFixed(1)}</span>
+                </p>
+                <p>
+                  avg exec: <span className="text-emerald-300">{scannerHealth.avgExecuted.toFixed(1)}</span> | avg err:{" "}
+                  <span className={scannerHealthFlags?.isErrHigh ? "text-rose-300" : "text-slate-300"}>
+                    {scannerHealth.avgErrors.toFixed(2)}
+                  </span>
+                </p>
+                <p>
+                  entry_gate_skip:{" "}
+                  <span className={scannerHealthFlags?.isEntryGateTooTight ? "text-rose-300" : "text-slate-300"}>
+                    {scannerHealth.totalEntryGateSkip}
+                  </span>{" "}
+                  | cooldown_skip:{" "}
+                  <span className={scannerHealthFlags?.isCooldownSpike ? "text-rose-300" : "text-slate-300"}>
+                    {scannerHealth.totalCooldownSkip}
+                  </span>{" "}
+                  | dynamic_floor_skip: {scannerHealth.totalDynamicFloorSkip} | dynamic_floor:{" "}
+                  <span className={scannerHealthFlags?.isDynamicFloorHigh ? "text-rose-300" : "text-slate-300"}>
+                    {scannerHealth.avgDynamicFloor != null ? scannerHealth.avgDynamicFloor.toFixed(1) : "-"}
+                  </span>
+                </p>
+                {scannerHealthFlags?.hasWarning ? (
+                  <p className="md:col-span-4 text-rose-200">
+                    Warning: scanner quality guard is tight. Check latest runs for error spike, cooldown spike, or overly strict filters.
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
             <div className="flex flex-wrap items-end justify-between gap-3">
               <p className="font-semibold text-slate-200">Auto Trading Backend Logs ({schedulerAccountMode})</p>
               <div className="flex flex-wrap items-center gap-2">
@@ -1832,14 +1951,34 @@ export function AutoTradingClient() {
                     </p>
                     <div className="mt-1 space-y-1">
                       {group.runs.map((run) => (
-                        <p key={run.id} className="font-mono">
-                          <span className="text-cyan-200">{formatDateTime(run.started_at)}</span> |{" "}
-                          <span className={automationRunStatusClass(run.run_status)}>{run.run_status}</span> | scan{" "}
-                          <span className="text-violet-300">{run.scanned}</span> | buy{" "}
-                          <span className="text-amber-300">{run.buy_candidates}</span> | exec{" "}
-                          <span className="text-emerald-300">{run.executed}</span> | err{" "}
-                          <span className={run.errors > 0 ? "text-rose-300" : "text-slate-400"}>{run.errors}</span>
-                        </p>
+                        <div key={run.id} className="font-mono">
+                          <p>
+                            <span className="text-cyan-200">{formatDateTime(run.started_at)}</span> |{" "}
+                            <span className={automationRunStatusClass(run.run_status)}>{run.run_status}</span> | scan{" "}
+                            <span className="text-violet-300">{run.scanned}</span> | buy{" "}
+                            <span className="text-amber-300">{run.buy_candidates}</span> | exec{" "}
+                            <span className="text-emerald-300">{run.executed}</span> | err{" "}
+                            <span className={run.errors > 0 ? "text-rose-300" : "text-slate-400"}>{run.errors}</span>
+                          </p>
+                          <p className="text-[11px] text-slate-500">
+                            {(() => {
+                              const detail = run.detail ?? {};
+                              const skippedEntryGate = asFiniteNumber(detail.skipped_entry_gate);
+                              const skippedCooldown = asFiniteNumber(detail.skipped_experience_cooldown);
+                              const skippedDynamicFloor = asFiniteNumber(detail.skipped_dynamic_buy_floor);
+                              const dynamicFloor = asFiniteNumber(detail.dynamic_buy_composite_floor);
+                              const decisionMeta = (detail.buy_decision_meta ?? {}) as Record<string, unknown>;
+                              const decisionSource = typeof decisionMeta.source === "string" ? decisionMeta.source : "-";
+                              return [
+                                `entry_gate_skip=${skippedEntryGate ?? 0}`,
+                                `cooldown_skip=${skippedCooldown ?? 0}`,
+                                `dynamic_floor_skip=${skippedDynamicFloor ?? 0}`,
+                                `dynamic_floor=${dynamicFloor != null ? dynamicFloor.toFixed(1) : "-"}`,
+                                `decision=${decisionSource}`,
+                              ].join(" | ");
+                            })()}
+                          </p>
+                        </div>
                       ))}
                     </div>
                   </div>
