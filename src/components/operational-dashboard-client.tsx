@@ -7,7 +7,7 @@ import { formatNumber } from "@/lib/format";
 import { hasDnseSession } from "@/lib/dnse-session";
 import { fetchDemoAccount, fetchDemoSessions, type DemoAccountData } from "@/services/auto-trading.api";
 import { fetchSchedulerStatus, toggleScheduler } from "@/services/automation.api";
-import { fetchMonitoringSummary, listRiskEvents } from "@/services/monitoring.api";
+import { fetchMonitoringSummary, listRiskEvents, listRuntimeLogs } from "@/services/monitoring.api";
 import { extractDnseRecords, fetchDnseAccount, fetchDnseAccountBalance, fetchDnseSubAccounts, isAppError, pickSubAccountNumbers } from "@/services/dnse.api";
 import { listSignals } from "@/services/signals.api";
 import {
@@ -21,7 +21,9 @@ import type {
   ClaudeRuntimeMetrics,
   CorePositionRow,
   CoreSettlementRow,
+  MonitoringAlertLogRow,
   MonitoringAiRuntime,
+  MonitoringRuntimeLogRow,
   MonitoringSummary,
   MonitoringTradingKpis,
   RiskEventRow,
@@ -361,6 +363,10 @@ export function OperationalDashboardClient() {
 
   const [riskEvents, setRiskEvents] = useState<RiskEventRow[]>([]);
   const [riskError, setRiskError] = useState<string | null>(null);
+  const [alertLogs, setAlertLogs] = useState<MonitoringAlertLogRow[]>([]);
+  const [alertLogsError, setAlertLogsError] = useState<string | null>(null);
+  const [runtimeLogs, setRuntimeLogs] = useState<MonitoringRuntimeLogRow[]>([]);
+  const [runtimeLogsError, setRuntimeLogsError] = useState<string | null>(null);
   const [schedulerStatus, setSchedulerStatus] = useState<{
     enabled: boolean;
     running: boolean;
@@ -498,6 +504,8 @@ export function OperationalDashboardClient() {
     setPositionsError(null);
     setSettlementError(null);
     setRiskError(null);
+    setAlertLogsError(null);
+    setRuntimeLogsError(null);
     setSchedulerError(null);
     setDnseAccountError(null);
     setDemoAccountError(null);
@@ -521,9 +529,12 @@ export function OperationalDashboardClient() {
 
       if (settled[0].status === "fulfilled") {
         setSummary(settled[0].value);
+        setAlertLogs(settled[0].value.recent_alerts ?? []);
       } else {
         setSummary(null);
         setSummaryError(errMsg(settled[0].reason));
+        setAlertLogs([]);
+        setAlertLogsError(UI_TEXT.operations.backendLogsLoadFailed);
       }
 
       if (settled[1].status === "fulfilled") {
@@ -579,8 +590,20 @@ export function OperationalDashboardClient() {
       }
       setDemoAccount(null);
       setDemoAccountError(null);
+      try {
+        const rows = await listRuntimeLogs(mode, 150);
+        if (generation === fetchGenerationRef.current) {
+          setRuntimeLogs(rows);
+          setRuntimeLogsError(null);
+        }
+      } catch {
+        if (generation === fetchGenerationRef.current) {
+          setRuntimeLogs([]);
+          setRuntimeLogsError(UI_TEXT.operations.runtimeLogsLoadFailed);
+        }
+      }
     } else {
-      const settled = await Promise.allSettled([fetchSchedulerStatus(mode)]);
+      const settled = await Promise.allSettled([fetchSchedulerStatus(mode), fetchMonitoringSummary(mode)]);
 
       if (generation !== fetchGenerationRef.current) {
         return;
@@ -591,6 +614,12 @@ export function OperationalDashboardClient() {
       } else {
         setSchedulerStatus(null);
         setSchedulerError(errMsg(settled[0].reason));
+      }
+      if (settled[1].status === "fulfilled") {
+        setAlertLogs(settled[1].value.recent_alerts ?? []);
+      } else {
+        setAlertLogs([]);
+        setAlertLogsError(UI_TEXT.operations.backendLogsLoadFailed);
       }
 
       setDnseAccountRows([]);
@@ -625,10 +654,26 @@ export function OperationalDashboardClient() {
         setPositions([]);
         setSettlement([]);
       }
+      try {
+        const rows = await listRuntimeLogs(mode, 150);
+        if (generation === fetchGenerationRef.current) {
+          setRuntimeLogs(rows);
+          setRuntimeLogsError(null);
+        }
+      } catch {
+        if (generation === fetchGenerationRef.current) {
+          setRuntimeLogs([]);
+          setRuntimeLogsError(UI_TEXT.operations.runtimeLogsLoadFailed);
+        }
+      }
     }
 
     setLoading(false);
   }, [loadDemoAccountInfo, loadRealAccountInfo]);
+
+  const alertLogsByMode = useMemo(() => {
+    return alertLogs.filter((row) => String(row.account_mode || "").toUpperCase() === accountMode);
+  }, [accountMode, alertLogs]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1146,6 +1191,70 @@ export function OperationalDashboardClient() {
         emptyHint={!loading && !summaryError && !summary ? UI_TEXT.operations.emptyBlock : undefined}
       >
         {summaryBody}
+      </SectionCard>
+
+      <SectionCard
+        title={UI_TEXT.operations.sectionRuntimeLogs}
+        description={UI_TEXT.operations.sectionRuntimeLogsHint}
+        error={runtimeLogsError}
+        emptyHint={!loading && !runtimeLogsError && runtimeLogs.length === 0 ? UI_TEXT.operations.runtimeLogsEmpty : undefined}
+      >
+        {runtimeLogs.length > 0 ? (
+          <div className="max-h-72 overflow-y-auto rounded-md border border-white/10 bg-black/25 p-3 font-mono text-xs text-slate-300">
+            <div className="space-y-1.5">
+              {runtimeLogs.map((row) => {
+                const payloadText = formatJson(row.payload ?? {});
+                return (
+                  <p key={row.id} className="break-all">
+                    <span className="text-cyan-200">{formatDateTime(row.created_at)}</span>
+                    {" | "}
+                    <span className="text-violet-300">{String(row.account_mode || "-")}</span>
+                    {" | "}
+                    <span className="text-amber-300">{row.level}</span>
+                    {" | "}
+                    <span className="text-slate-200">{row.source}</span>
+                    {" | "}
+                    {row.message}
+                    {" | payload="}
+                    <span className="text-slate-500">{payloadText}</span>
+                  </p>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
+      </SectionCard>
+
+      <SectionCard
+        title={UI_TEXT.operations.sectionAlertLogs}
+        description={UI_TEXT.operations.sectionAlertLogsHint}
+        error={alertLogsError}
+        emptyHint={!loading && !alertLogsError && alertLogsByMode.length === 0 ? UI_TEXT.operations.backendLogsEmpty : undefined}
+      >
+        {alertLogsByMode.length > 0 ? (
+          <div className="max-h-72 overflow-y-auto rounded-md border border-white/10 bg-black/25 p-3 font-mono text-xs text-slate-300">
+            <div className="space-y-1.5">
+              {alertLogsByMode.map((row) => {
+                const payloadText = formatJson(row.payload ?? {});
+                return (
+                  <p key={row.id} className="break-all">
+                    <span className="text-cyan-200">{formatDateTime(row.created_at)}</span>
+                    {" | "}
+                    <span className="text-violet-300">{String(row.account_mode || "-")}</span>
+                    {" | "}
+                    <span className="text-amber-300">{row.severity}</span>
+                    {" | "}
+                    <span className="text-slate-200">{row.rule_id}</span>
+                    {" | "}
+                    {row.message}
+                    {" | payload="}
+                    <span className="text-slate-500">{payloadText}</span>
+                  </p>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
       </SectionCard>
 
       <SectionCard

@@ -83,6 +83,26 @@ export interface MonitoringAiRuntime {
   claude_experience: ClaudeRuntimeMetrics;
 }
 
+export interface MonitoringAlertLogRow {
+  id: string;
+  account_mode: string | null;
+  rule_id: string;
+  severity: string;
+  message: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface MonitoringRuntimeLogRow {
+  id: string;
+  account_mode: string | null;
+  source: string;
+  level: string;
+  message: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
 export interface MonitoringSummary {
   account_mode: AccountMode;
   portfolio: MonitoringPortfolioSlice;
@@ -92,6 +112,7 @@ export interface MonitoringSummary {
   operational_health?: MonitoringOperationalHealth;
   kpis?: MonitoringTradingKpis;
   ai_runtime?: MonitoringAiRuntime;
+  recent_alerts?: MonitoringAlertLogRow[];
 }
 
 export interface RiskEventRow {

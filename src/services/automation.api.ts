@@ -52,6 +52,7 @@ export interface ShortTermCycleRunRequest {
   enforce_vn_scan_schedule?: boolean;
   async_for_heavy?: boolean;
   demo_session_id?: string;
+  real_account_available_cash_vnd?: number;
 }
 
 export interface ShortTermCycleRunResponse {
@@ -103,6 +104,7 @@ export interface MailSignalEntryRunData {
   success: boolean;
   source_key: string;
   account_mode: string;
+  demo_session_id?: string | null;
   scanned: number;
   executed: Array<{
     symbol: string;
@@ -112,6 +114,44 @@ export interface MailSignalEntryRunData {
   }>;
   skipped: Array<Record<string, unknown>>;
   ran_at: string;
+}
+
+export interface MailSignalEntryRunsResponse {
+  data: MailSignalEntryRunData[];
+  limit: number;
+}
+
+export interface MailSignalEntryRunOnceRequest {
+  account_mode?: "REAL" | "DEMO";
+  demo_session_id?: string;
+  real_account_available_cash_vnd?: number;
+}
+
+export interface RealRecommendationRow {
+  symbol: string;
+  entry: number;
+  take_profit: number;
+  stop_loss: number;
+  confidence: number;
+  reason: string;
+}
+
+export interface RealRecommendationsData {
+  generated_at?: string | null;
+  exchange_scope?: ShortTermExchangeScope | string;
+  limit_symbols?: number;
+  scanned: number;
+  recommendations: RealRecommendationRow[];
+  count: number;
+}
+
+export interface RealRecommendationScanRequest {
+  exchange_scope?: ShortTermExchangeScope;
+  limit_symbols?: number;
+}
+
+export interface RealRecommendationActionBuyRequest extends RealRecommendationRow {
+  available_cash_vnd: number;
 }
 
 export interface LiquidityEligibleCacheRow {
@@ -247,6 +287,42 @@ export async function fetchMailSignalEntryRunLatest(): Promise<MailSignalEntryRu
   }
 }
 
+export async function fetchMailSignalEntryRunsRecent(
+  limit = 10,
+  options?: { demoSessionId?: string | null },
+): Promise<MailSignalEntryRunsResponse> {
+  try {
+    const params = new URLSearchParams({ limit: String(limit) });
+    const demoSessionId = options?.demoSessionId?.trim();
+    if (demoSessionId) {
+      params.set("demo_session_id", demoSessionId);
+    }
+    const response = await httpClient.get<{ success: boolean; data: MailSignalEntryRunData[]; limit: number }>(
+      `/automation/mail-signals/entry-run/recent?${params.toString()}`,
+    );
+    return {
+      data: response.data.data ?? [],
+      limit: Number(response.data.limit ?? limit),
+    };
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function postMailSignalEntryRunOnce(
+  body: MailSignalEntryRunOnceRequest,
+): Promise<MailSignalEntryRunData | null> {
+  try {
+    const response = await httpClient.post<{ success: boolean; data: MailSignalEntryRunData | null }>(
+      "/automation/mail-signals/entry-run-once",
+      body,
+    );
+    return response.data.data ?? null;
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
 export async function fetchShortTermLiquidityEligibleCache(
   exchangeScope: ShortTermExchangeScope = "ALL",
   limit = 300,
@@ -263,6 +339,38 @@ export async function fetchShortTermLiquidityEligibleCache(
       data: response.data.data ?? [],
       meta: response.data.meta,
     };
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function postRealRecommendationsScan(body: RealRecommendationScanRequest): Promise<RealRecommendationsData> {
+  try {
+    const response = await httpClient.post<{ success: boolean; data: RealRecommendationsData }>(
+      "/automation/real/recommendations/scan",
+      body,
+    );
+    return response.data.data;
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function fetchRealRecommendationsLatest(): Promise<RealRecommendationsData> {
+  try {
+    const response = await httpClient.get<{ success: boolean; data: RealRecommendationsData }>(
+      "/automation/real/recommendations/latest",
+    );
+    return response.data.data;
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function postRealRecommendationActionBuy(body: RealRecommendationActionBuyRequest): Promise<Record<string, unknown>> {
+  try {
+    const response = await httpClient.post<Record<string, unknown>>("/automation/real/recommendations/action-buy", body);
+    return response.data;
   } catch (error) {
     throw normalizeError(error);
   }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -37,15 +37,19 @@ import {
   type DemoSessionOverviewData,
 } from "@/services/auto-trading.api";
 import {
+  fetchRealRecommendationsLatest,
   fetchShortTermLiquidityEligibleCache,
-  fetchMailSignalEntryRunLatest,
+  fetchMailSignalEntryRunsRecent,
   fetchMailSignalsLatest,
+  postRealRecommendationActionBuy,
+  postRealRecommendationsScan,
   fetchSchedulerDemoSession,
   fetchShortTermAsyncJob,
   parseShortTermRunExchangeScope,
   fetchSchedulerStatus,
   fetchShortTermRuns,
   postShortTermRunCycle,
+  postMailSignalEntryRunOnce,
   setSchedulerDemoSession,
   SHORT_TERM_RUN_LOG_SCOPE_ORDER,
   shortTermRunLogScopeBucket,
@@ -56,14 +60,25 @@ import {
   type MailSignalsData,
   type MailSignalEntryRunData,
   type ShortTermRunLogScopeBucket,
+  type RealRecommendationRow,
   type LiquidityEligibleCacheRow,
 } from "@/services/automation.api";
 import { getSymbolDailyQuoteSnapshot } from "@/services/vnstock.api";
+import {
+  cancelExecutionOrder,
+  getCoreOrders,
+  getOrderEvents,
+  placeExecutionOrder,
+  reconcileExecutionOrder,
+  type CoreOrderEventRow,
+  type CoreOrderRow,
+} from "@/services/trading-core.api";
 
 type AccountTab = "real" | "demo";
 
 const DEMO_INITIAL_CASH_VND = 100_000_000;
 const AUTO_TRADING_BACKEND_LOGS_PER_SCOPE = 5;
+const DNSE_DEPOSIT_QR_URL = (process.env.NEXT_PUBLIC_DNSE_DEPOSIT_QR_URL ?? "/QR_Code.png").trim();
 
 interface DemoPosition {
   symbol: string;
@@ -125,11 +140,19 @@ function formatVnd(n: number): string {
   return new Intl.NumberFormat("vi-VN", { maximumFractionDigits: 0 }).format(n);
 }
 
+function normalizeVnStockPrice(n: number): number {
+  if (!Number.isFinite(n) || n <= 0) {
+    return n;
+  }
+  return n < 1000 ? n * 1000 : n;
+}
+
 function formatPrice(n: number): string {
-  if (!Number.isFinite(n)) {
+  const normalized = normalizeVnStockPrice(n);
+  if (!Number.isFinite(normalized)) {
     return "-";
   }
-  return new Intl.NumberFormat("vi-VN", { maximumFractionDigits: 2 }).format(n);
+  return new Intl.NumberFormat("vi-VN", { maximumFractionDigits: 2 }).format(normalized);
 }
 
 function formatDateTime(iso: string): string {
@@ -138,6 +161,42 @@ function formatDateTime(iso: string): string {
     return iso;
   }
   return d.toLocaleString("vi-VN", { hour12: false });
+}
+
+function getVnHourMinute(now: Date): { hour: number; minute: number } {
+  const formatter = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Ho_Chi_Minh",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const parts = formatter.formatToParts(now);
+  const hourText = parts.find((part) => part.type === "hour")?.value ?? "0";
+  const minuteText = parts.find((part) => part.type === "minute")?.value ?? "0";
+  return {
+    hour: Number.parseInt(hourText, 10),
+    minute: Number.parseInt(minuteText, 10),
+  };
+}
+
+function isInVnTradingSession(now: Date): boolean {
+  const dayFormatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Ho_Chi_Minh",
+    weekday: "short",
+  });
+  const weekday = dayFormatter.format(now);
+  if (weekday === "Sat" || weekday === "Sun") {
+    return false;
+  }
+  const { hour, minute } = getVnHourMinute(now);
+  const totalMinutes = hour * 60 + minute;
+  const morningStart = 9 * 60;
+  const morningEnd = 11 * 60 + 30;
+  const afternoonStart = 13 * 60;
+  const afternoonEnd = 14 * 60 + 45;
+  const inMorning = totalMinutes >= morningStart && totalMinutes <= morningEnd;
+  const inAfternoon = totalMinutes >= afternoonStart && totalMinutes <= afternoonEnd;
+  return inMorning || inAfternoon;
 }
 
 function asFiniteNumber(value: unknown): number | null {
@@ -235,6 +294,20 @@ function extractDnseTradableCashFromRows(rows: Record<string, unknown>[]): numbe
   return null;
 }
 
+function extractRealSchedulerCashFromRows(rows: Record<string, unknown>[]): number | null {
+  // Production rule: REAL auto scheduler uses broker-reported available cash first, then purchasing power.
+  const preferredKeys = ["availableCash", "purchasingPower"];
+  for (const row of rows) {
+    for (const key of preferredKeys) {
+      const n = parseNumberCandidate(row[key]);
+      if (n != null && n >= 0) {
+        return n;
+      }
+    }
+  }
+  return null;
+}
+
 function extractDnseAccountNameFromRows(rows: Record<string, unknown>[]): string | null {
   const nameKeys = [
     "customerName",
@@ -288,18 +361,20 @@ function extractDnseHoldingsFromRows(rows: Record<string, unknown>[]): DnseHoldi
     if (!Number.isFinite(qty) || qty <= 0) {
       continue;
     }
-    const avg =
+    const avgRaw =
       parseNumberCandidate(row.avgPrice) ??
       parseNumberCandidate(row.avg_price) ??
       parseNumberCandidate(row.averagePrice) ??
       parseNumberCandidate(row.average_price) ??
       null;
-    const market =
+    const marketRaw =
       parseNumberCandidate(row.marketPrice) ??
       parseNumberCandidate(row.market_price) ??
       parseNumberCandidate(row.lastPrice) ??
       parseNumberCandidate(row.last_price) ??
       null;
+    const avg = avgRaw != null ? normalizeVnStockPrice(avgRaw) : null;
+    const market = marketRaw != null ? normalizeVnStockPrice(marketRaw) : null;
     out.push({
       symbol,
       quantity: Math.trunc(qty),
@@ -315,6 +390,7 @@ const HOLDINGS_BAR_COLOR = "#a78bfa";
 
 export function AutoTradingClient() {
   const { showToast } = useToast();
+  const realAutoScheduleBusyRef = useRef(false);
   const [accountTab, setAccountTab] = useState<AccountTab>("real");
   const [schedulerStatus, setSchedulerStatus] = useState<{
     account_mode: "REAL" | "DEMO";
@@ -330,7 +406,7 @@ export function AutoTradingClient() {
   const [automationRunsError, setAutomationRunsError] = useState("");
   const [mailSignals, setMailSignals] = useState<MailSignalsData | null>(null);
   const [mailSignalsError, setMailSignalsError] = useState("");
-  const [mailSignalEntryRun, setMailSignalEntryRun] = useState<MailSignalEntryRunData | null>(null);
+  const [mailSignalEntryRuns, setMailSignalEntryRuns] = useState<MailSignalEntryRunData[]>([]);
   const [mailSignalEntryRunError, setMailSignalEntryRunError] = useState("");
   const [liquidityEligibleRows, setLiquidityEligibleRows] = useState<LiquidityEligibleCacheRow[]>([]);
   const [liquidityEligibleError, setLiquidityEligibleError] = useState("");
@@ -342,6 +418,21 @@ export function AutoTradingClient() {
   const [manualCycleAsyncJobId, setManualCycleAsyncJobId] = useState<string | null>(null);
   const [manualCycleAsyncStatus, setManualCycleAsyncStatus] = useState<ShortTermAsyncJobStatus | null>(null);
   const [manualCycleAsyncNotified, setManualCycleAsyncNotified] = useState(false);
+  const [realRecommendations, setRealRecommendations] = useState<RealRecommendationRow[]>([]);
+  const [realRecommendationsGeneratedAt, setRealRecommendationsGeneratedAt] = useState<string | null>(null);
+  const [realRecommendationsBusy, setRealRecommendationsBusy] = useState(false);
+  const [realRecommendationsError, setRealRecommendationsError] = useState("");
+  const [realRecommendationBuyBusySymbol, setRealRecommendationBuyBusySymbol] = useState("");
+  const [realPendingOrders, setRealPendingOrders] = useState<CoreOrderRow[]>([]);
+  const [realPendingOrdersBusy, setRealPendingOrdersBusy] = useState(false);
+  const [realPendingOrdersError, setRealPendingOrdersError] = useState("");
+  const [realPendingCancelBusyOrderId, setRealPendingCancelBusyOrderId] = useState("");
+  const [realPendingDetailOrderId, setRealPendingDetailOrderId] = useState("");
+  const [realPendingDetailEvents, setRealPendingDetailEvents] = useState<CoreOrderEventRow[]>([]);
+  const [realPendingDetailBusy, setRealPendingDetailBusy] = useState(false);
+  const [realPendingDetailError, setRealPendingDetailError] = useState("");
+  const [realHoldingSellBusySymbol, setRealHoldingSellBusySymbol] = useState("");
+  const [realShortTermLogScopeFilter, setRealShortTermLogScopeFilter] = useState<"ANY" | ShortTermExchangeScope>("ANY");
 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -393,38 +484,59 @@ export function AutoTradingClient() {
   const schedulerAccountMode: "REAL" | "DEMO" = accountTab === "real" ? "REAL" : "DEMO";
 
   const automationRunLogGroups = useMemo(() => {
-    const runsBySession = automationRuns.filter((run) => {
-      if (schedulerAccountMode !== "DEMO") {
-        return true;
-      }
-      const sid = String((run.detail?.demo_session_id as string | undefined) || "").trim();
-      return sid.length > 0 && sid === demoSessionId;
+    const runsByMode = automationRuns.filter((run) => {
+      const mode = String((run.detail?.account_mode as string | undefined) || "").trim().toUpperCase();
+      return mode === schedulerAccountMode;
     });
-    const scopedRuns = runsBySession.filter((run) => {
+    const scopedRuns = runsByMode.filter((run) => {
       if (automationLogScopeFilter === "ANY") {
         return true;
       }
       return parseShortTermRunExchangeScope(run.detail) === automationLogScopeFilter;
     });
-    const buckets = new Map<ShortTermRunLogScopeBucket, ShortTermAutomationRunRow[]>();
-    for (const bucket of [...SHORT_TERM_RUN_LOG_SCOPE_ORDER, "OTHER" as const]) {
-      buckets.set(bucket, []);
-    }
-    for (const run of scopedRuns) {
-      const bucket = shortTermRunLogScopeBucket(run.detail);
-      buckets.get(bucket)?.push(run);
-    }
     const orderedBuckets: ShortTermRunLogScopeBucket[] = [...SHORT_TERM_RUN_LOG_SCOPE_ORDER, "OTHER"];
-    return orderedBuckets
-      .map((bucket) => ({
-        bucket,
-        runs: (buckets.get(bucket) ?? []).slice(0, AUTO_TRADING_BACKEND_LOGS_PER_SCOPE),
-      }))
-      .filter((g) => g.runs.length > 0);
+    const buildGroupsForRuns = (runs: ShortTermAutomationRunRow[]) => {
+      const buckets = new Map<ShortTermRunLogScopeBucket, ShortTermAutomationRunRow[]>();
+      for (const bucket of orderedBuckets) {
+        buckets.set(bucket, []);
+      }
+      for (const run of runs) {
+        const bucket = shortTermRunLogScopeBucket(run.detail);
+        buckets.get(bucket)?.push(run);
+      }
+      return orderedBuckets
+        .map((bucket) => ({
+          bucket,
+          runs: (buckets.get(bucket) ?? []).slice(0, AUTO_TRADING_BACKEND_LOGS_PER_SCOPE),
+        }))
+        .filter((g) => g.runs.length > 0);
+    };
+    if (schedulerAccountMode !== "DEMO") {
+      return [
+        {
+          sessionId: null as string | null,
+          groups: buildGroupsForRuns(scopedRuns),
+        },
+      ].filter((block) => block.groups.length > 0);
+    }
+    const selectedSessionRows = scopedRuns.filter((run) => {
+      const runSid = String((run.detail?.demo_session_id as string | undefined) || "").trim();
+      return runSid === demoSessionId;
+    });
+    return [
+      {
+        sessionId: demoSessionId || null,
+        groups: buildGroupsForRuns(selectedSessionRows),
+      },
+    ].filter((block) => block.sessionId && block.groups.length > 0);
   }, [automationLogScopeFilter, automationRuns, demoSessionId, schedulerAccountMode]);
 
   const scannerHealth = useMemo(() => {
     const scopedRuns = automationRuns
+      .filter((run) => {
+        const mode = String((run.detail?.account_mode as string | undefined) || "").trim().toUpperCase();
+        return mode === schedulerAccountMode;
+      })
       .filter((run) => {
         if (schedulerAccountMode !== "DEMO") {
           return true;
@@ -512,6 +624,27 @@ export function AutoTradingClient() {
     };
   }, [scannerHealth]);
 
+  const realShortTermRuns = useMemo(() => {
+    const rows = automationRuns
+      .filter((run) => {
+        const mode = String((run.detail?.account_mode as string | undefined) || "").trim().toUpperCase();
+        return mode === "REAL";
+      })
+      .filter((run) => {
+        if (realShortTermLogScopeFilter === "ANY") {
+          return true;
+        }
+        return parseShortTermRunExchangeScope(run.detail) === realShortTermLogScopeFilter;
+      });
+    return rows.slice(0, 10);
+  }, [automationRuns, realShortTermLogScopeFilter]);
+
+  const realMailSignalRunLogs = useMemo(() => {
+    return mailSignalEntryRuns
+      .filter((run) => String(run.account_mode || "").trim().toUpperCase() === "REAL")
+      .slice(0, 10);
+  }, [mailSignalEntryRuns]);
+
   const overviewDonutData = useMemo(
     () => [
       { name: "Tien mat", value: Math.max(0, Number(demoPortfolioSnapshot.cashAvailable || 0)) },
@@ -527,7 +660,7 @@ export function AutoTradingClient() {
     return [...demoOverview.holdings]
       .map((h) => ({
         symbol: String(h.symbol || "").toUpperCase(),
-        value: Number(h.quantity || 0) * Number(h.average_buy_price || 0),
+        value: Number(h.position_value || 0),
       }))
       .filter((row) => row.symbol && Number.isFinite(row.value) && row.value > 0)
       .sort((a, b) => b.value - a.value)
@@ -615,11 +748,8 @@ export function AutoTradingClient() {
     async (sessionId: string) => {
       try {
         const overview = await fetchDemoOverview(sessionId);
-        const stockValue = (overview.holdings || []).reduce(
-          (sum, h) => sum + Number(h.quantity || 0) * Number(h.average_buy_price || 0),
-          0,
-        );
-        const totalAssets = Number(overview.cash_balance || 0) + stockValue;
+        const stockValue = Number(overview.stock_value || 0);
+        const totalAssets = Number(overview.total_assets || 0);
         setDemoOverview(overview);
         setDemoPortfolioSnapshot({
           totalAssets,
@@ -729,16 +859,18 @@ export function AutoTradingClient() {
     }
   }, []);
 
-  const loadMailSignalEntryRun = useCallback(async () => {
+  const loadMailSignalEntryRuns = useCallback(async () => {
     try {
-      const row = await fetchMailSignalEntryRunLatest();
-      setMailSignalEntryRun(row);
+      const response = await fetchMailSignalEntryRunsRecent(10, {
+        demoSessionId: schedulerAccountMode === "DEMO" ? demoSessionId : null,
+      });
+      setMailSignalEntryRuns(response.data);
       setMailSignalEntryRunError("");
     } catch (error) {
-      setMailSignalEntryRun(null);
-      setMailSignalEntryRunError(isAppError(error) ? error.message : "Khong tai duoc entry scheduler log moi nhat.");
+      setMailSignalEntryRuns([]);
+      setMailSignalEntryRunError(isAppError(error) ? error.message : "Khong tai duoc 10 entry scheduler log gan nhat.");
     }
-  }, []);
+  }, [demoSessionId, schedulerAccountMode]);
 
   const loadLiquidityEligibleRows = useCallback(async () => {
     try {
@@ -752,6 +884,220 @@ export function AutoTradingClient() {
       setLiquidityEligibleError(isAppError(error) ? error.message : "Khong tai duoc liquidity cache rows.");
     }
   }, []);
+
+  const loadRealRecommendations = useCallback(async () => {
+    try {
+      const response = await fetchRealRecommendationsLatest();
+      setRealRecommendations(response.recommendations ?? []);
+      setRealRecommendationsGeneratedAt(response.generated_at ?? null);
+      setRealRecommendationsError("");
+    } catch (error) {
+      setRealRecommendations([]);
+      setRealRecommendationsGeneratedAt(null);
+      setRealRecommendationsError(isAppError(error) ? error.message : "Khong tai duoc danh sach khuyen nghi REAL.");
+    }
+  }, []);
+
+  const loadRealPendingOrders = useCallback(async () => {
+    setRealPendingOrdersBusy(true);
+    try {
+      const rows = await getCoreOrders("REAL", 120);
+      const pending = rows.filter((row) => {
+        const status = String(row.status || "").trim().toUpperCase();
+        return status === "NEW" || status === "SENT" || status === "ACK" || status === "PARTIAL";
+      });
+      setRealPendingOrders(pending);
+      setRealPendingOrdersError("");
+    } catch (error) {
+      setRealPendingOrders([]);
+      setRealPendingOrdersError(isAppError(error) ? error.message : "Khong tai duoc lenh REAL dang pending.");
+    } finally {
+      setRealPendingOrdersBusy(false);
+    }
+  }, []);
+
+  const handlePollRealPendingOrders = useCallback(async () => {
+    setRealPendingOrdersBusy(true);
+    try {
+      const rows = await getCoreOrders("REAL", 120);
+      const pendingIds = rows
+        .filter((row) => {
+          const status = String(row.status || "").trim().toUpperCase();
+          return status === "NEW" || status === "SENT" || status === "ACK" || status === "PARTIAL";
+        })
+        .map((row) => row.id);
+      for (const orderId of pendingIds.slice(0, 30)) {
+        try {
+          await reconcileExecutionOrder(orderId);
+        } catch {
+          // Keep polling resilient per order.
+        }
+      }
+      await loadRealPendingOrders();
+    } catch (error) {
+      setRealPendingOrdersError(isAppError(error) ? error.message : "Poll lenh REAL pending that bai.");
+    } finally {
+      setRealPendingOrdersBusy(false);
+    }
+  }, [loadRealPendingOrders]);
+
+  const handleCancelRealPendingOrder = useCallback(
+    async (orderId: string) => {
+      const trimmed = String(orderId || "").trim();
+      if (!trimmed) {
+        return;
+      }
+      const confirmed = window.confirm(`Xac nhan huy lenh ${trimmed}?`);
+      if (!confirmed) {
+        return;
+      }
+      setRealPendingCancelBusyOrderId(trimmed);
+      try {
+        const response = await cancelExecutionOrder(trimmed);
+        const success = Boolean((response as { success?: boolean }).success);
+        if (!success) {
+          throw new Error(String(((response as { data?: { reason?: string } }).data?.reason ?? "cancel_failed")));
+        }
+        showToast(`Da huy lenh ${trimmed}.`, "success");
+        await loadRealPendingOrders();
+      } catch (error) {
+        const message = isAppError(error) ? error.message : `Huy lenh that bai: ${trimmed}`;
+        setRealPendingOrdersError(message);
+        showToast(message, "error");
+      } finally {
+        setRealPendingCancelBusyOrderId("");
+      }
+    },
+    [loadRealPendingOrders, showToast],
+  );
+
+  const handleShowRealPendingOrderDetail = useCallback(async (order: CoreOrderRow) => {
+    const orderId = String(order.id || "").trim();
+    if (!orderId) {
+      return;
+    }
+    setRealPendingDetailOrderId(orderId);
+    setRealPendingDetailBusy(true);
+    setRealPendingDetailError("");
+    try {
+      const events = await getOrderEvents(orderId);
+      setRealPendingDetailEvents(events);
+    } catch (error) {
+      setRealPendingDetailEvents([]);
+      setRealPendingDetailError(isAppError(error) ? error.message : `Khong tai duoc detail cho lenh ${orderId}.`);
+    } finally {
+      setRealPendingDetailBusy(false);
+    }
+  }, []);
+
+  const handleSellRealHolding = useCallback(
+    async (row: DnseHoldingSummaryRow) => {
+      const symbol = String(row.symbol || "").trim().toUpperCase();
+      const quantity = Math.trunc(Number(row.quantity || 0));
+      const market = row.marketPrice != null ? normalizeVnStockPrice(Number(row.marketPrice)) : 0;
+      const average = row.averagePrice != null ? normalizeVnStockPrice(Number(row.averagePrice)) : 0;
+      const price = market > 0 ? market : average;
+      const confirmed = window.confirm(
+        `Xac nhan dat lenh BAN?\nSymbol: ${symbol}\nSo luong: ${quantity}\nGia dat: ${formatPrice(price)}`,
+      );
+      if (!confirmed) {
+        return;
+      }
+      if (!symbol || quantity <= 0 || price <= 0) {
+        const message = "Khong du du lieu de dat lenh BAN (symbol/quantity/price).";
+        showToast(message, "error");
+        return;
+      }
+      setRealHoldingSellBusySymbol(symbol);
+      try {
+        const response = await placeExecutionOrder({
+          account_mode: "REAL",
+          symbol,
+          side: "SELL",
+          quantity,
+          price,
+          auto_process: true,
+          metadata: {
+            source: "real_holdings_action_sell",
+            market_price_snapshot: market > 0 ? market : null,
+            average_price_snapshot: average > 0 ? average : null,
+          },
+        });
+        const success = Boolean((response as { success?: boolean }).success);
+        if (!success) {
+          const reason = String(((response as { data?: { reason?: string } }).data?.reason ?? "sell_order_rejected"));
+          throw new Error(reason);
+        }
+        showToast(`Da gui lenh BAN ${symbol} (${quantity} cp).`, "success");
+        await loadRealPendingOrders();
+      } catch (error) {
+        const message = isAppError(error) ? error.message : `Dat lenh BAN that bai cho ${symbol}.`;
+        showToast(message, "error");
+      } finally {
+        setRealHoldingSellBusySymbol("");
+      }
+    },
+    [loadRealPendingOrders, showToast],
+  );
+
+  const handleScanRealRecommendations = useCallback(async () => {
+    setRealRecommendationsBusy(true);
+    try {
+      const response = await postRealRecommendationsScan({
+        exchange_scope: "ALL",
+        limit_symbols: 0,
+      });
+      setRealRecommendations(response.recommendations ?? []);
+      setRealRecommendationsGeneratedAt(response.generated_at ?? null);
+      setRealRecommendationsError("");
+      showToast(`Da luu ${Number(response.count || 0)} khuyen nghi BUY vao Redis.`, "success");
+    } catch (error) {
+      const message = isAppError(error) ? error.message : "Scan recommendations REAL that bai.";
+      setRealRecommendationsError(message);
+      showToast(message, "error");
+    } finally {
+      setRealRecommendationsBusy(false);
+    }
+  }, [showToast]);
+
+  const handleActionBuyRealRecommendation = useCallback(
+    async (row: RealRecommendationRow) => {
+      const confirmed = window.confirm(
+        `Xac nhan Action Buy?\nSymbol: ${row.symbol}\nEntry: ${formatPrice(row.entry)}\nTP: ${formatPrice(row.take_profit)}\nSL: ${formatPrice(row.stop_loss)}`,
+      );
+      if (!confirmed) {
+        return;
+      }
+      const availableCash = Number(dnseAccountSummary?.tradableCash ?? 0);
+      if (!Number.isFinite(availableCash) || availableCash <= 0) {
+        const message = "Khong tim thay available cash REAL. Vui long tai lai thong tin tai khoan DNSE.";
+        setRealRecommendationsError(message);
+        showToast(message, "error");
+        return;
+      }
+      setRealRecommendationBuyBusySymbol(row.symbol);
+      try {
+        const response = await postRealRecommendationActionBuy({
+          ...row,
+          available_cash_vnd: availableCash,
+        });
+        const success = Boolean((response as { success?: boolean }).success);
+        if (!success) {
+          const reason = String(((response as { data?: { reason?: string } }).data?.reason ?? "action_buy_rejected"));
+          throw new Error(reason);
+        }
+        showToast(`Da gui lenh BUY cho ${row.symbol}.`, "success");
+        await loadRealPendingOrders();
+      } catch (error) {
+        const message = isAppError(error) ? error.message : `Action Buy that bai cho ${row.symbol}.`;
+        setRealRecommendationsError(message);
+        showToast(message, "error");
+      } finally {
+        setRealRecommendationBuyBusySymbol("");
+      }
+    },
+    [dnseAccountSummary?.tradableCash, loadRealPendingOrders, showToast],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -806,13 +1152,17 @@ export function AutoTradingClient() {
     void loadSchedulerStatus();
     void loadAutomationRuns();
     void loadMailSignals();
-    void loadMailSignalEntryRun();
+    void loadMailSignalEntryRuns();
     void loadLiquidityEligibleRows();
+    void loadRealRecommendations();
+    void loadRealPendingOrders();
   }, [
     loadAutomationRuns,
     loadLiquidityEligibleRows,
-    loadMailSignalEntryRun,
+    loadMailSignalEntryRuns,
     loadMailSignals,
+    loadRealPendingOrders,
+    loadRealRecommendations,
     loadSchedulerStatus,
   ]);
 
@@ -828,8 +1178,10 @@ export function AutoTradingClient() {
       void loadSchedulerStatus();
       void loadAutomationRuns();
       void loadMailSignals();
-      void loadMailSignalEntryRun();
+      void loadMailSignalEntryRuns();
       void loadLiquidityEligibleRows();
+      void loadRealRecommendations();
+      void loadRealPendingOrders();
     };
 
     const id = window.setInterval(tick, intervalMs);
@@ -837,12 +1189,96 @@ export function AutoTradingClient() {
   }, [
     loadAutomationRuns,
     loadLiquidityEligibleRows,
-    loadMailSignalEntryRun,
+    loadMailSignalEntryRuns,
     loadMailSignals,
+    loadRealPendingOrders,
+    loadRealRecommendations,
     loadSchedulerStatus,
     schedulerAccountMode,
     schedulerStatus?.interval_minutes,
   ]);
+
+  useEffect(() => {
+    if (accountTab !== "real") {
+      return;
+    }
+    const slotKeyName = "real_auto_trading_last_15m_slot";
+    const tick = async () => {
+      try {
+        if (!sessionActive) {
+          return;
+        }
+        if (!schedulerStatus?.enabled) {
+          return;
+        }
+        if (realAutoScheduleBusyRef.current) {
+          return;
+        }
+        const now = new Date();
+        if (!isInVnTradingSession(now)) {
+          return;
+        }
+        const vnFormatter = new Intl.DateTimeFormat("sv-SE", {
+          timeZone: "Asia/Ho_Chi_Minh",
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        });
+        const vnText = vnFormatter.format(now).replace(" ", "T");
+        const { hour, minute } = getVnHourMinute(now);
+        if (minute % 15 !== 0) {
+          return;
+        }
+        const slotKey = `${vnText.slice(0, 10)}-${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+        const lastSlot = typeof window !== "undefined" ? window.localStorage.getItem(slotKeyName) ?? "" : "";
+        if (lastSlot === slotKey) {
+          return;
+        }
+        const subAccountsRes = await fetchDnseSubAccounts({});
+        const subAccountRows = extractDnseRecords(subAccountsRes);
+        const subAccounts = pickSubAccountNumbers(subAccountRows);
+        const selectedSubAccount = subAccounts[0];
+        if (!selectedSubAccount) {
+          throw new Error("Khong tim thay sub-account DNSE de lay so du REAL.");
+        }
+        const balanceRes = await fetchDnseAccountBalance({ sub_account: selectedSubAccount });
+        const balanceRows = extractDnseRecords(balanceRes);
+        const tradableCash = extractRealSchedulerCashFromRows(balanceRows);
+        if (tradableCash == null || tradableCash <= 0) {
+          throw new Error("Khong lay duoc availableCash/purchasingPower REAL tu DNSE.");
+        }
+        realAutoScheduleBusyRef.current = true;
+        await postShortTermRunCycle({
+          exchange_scope: "ALL",
+          account_mode: "REAL",
+          async_for_heavy: true,
+          enforce_vn_scan_schedule: false,
+          real_account_available_cash_vnd: tradableCash,
+        });
+        await postMailSignalEntryRunOnce({
+          account_mode: "REAL",
+          real_account_available_cash_vnd: tradableCash,
+        });
+        if (typeof window !== "undefined") {
+          window.localStorage.setItem(slotKeyName, slotKey);
+        }
+        await Promise.all([loadAutomationRuns(), loadMailSignalEntryRuns()]);
+      } catch (error) {
+        const message = isAppError(error) ? error.message : "Khong trigger duoc lich REAL auto trading.";
+        setManualCycleError(message);
+      } finally {
+        realAutoScheduleBusyRef.current = false;
+      }
+    };
+    void tick();
+    const id = window.setInterval(() => {
+      void tick();
+    }, 30_000);
+    return () => window.clearInterval(id);
+  }, [accountTab, sessionActive, schedulerStatus?.enabled, loadAutomationRuns, loadMailSignalEntryRuns]);
 
   const handleDnseLogin = async () => {
     setSessionBusy(true);
@@ -919,6 +1355,22 @@ export function AutoTradingClient() {
       setAccountProbeBusy(false);
     }
   };
+
+  useEffect(() => {
+    if (accountTab !== "real") {
+      return;
+    }
+    if (!hasDnseSession()) {
+      return;
+    }
+    if (accountProbeBusy) {
+      return;
+    }
+    if (dnseAccountSummary) {
+      return;
+    }
+    void handleProbeAccount();
+  }, [accountTab, accountProbeBusy, dnseAccountSummary, handleProbeAccount]);
 
   const handleLoadMoreHistory = async () => {
     const nextOffset = historyOffset + historyLimit;
@@ -1158,20 +1610,22 @@ export function AutoTradingClient() {
         >
           {UI_TEXT.autoTrading.tabDemo}
         </button>
-        <div className="ml-auto flex items-center gap-2">
-          <span className="text-xs text-slate-400">
-            Auto {schedulerAccountMode}: {schedulerStatus?.enabled ? "ON" : "OFF"} /{" "}
-            {schedulerStatus?.running ? "RUNNING" : "STOPPED"}
-          </span>
-          <button
-            type="button"
-            onClick={() => void handleToggleScheduler()}
-            disabled={schedulerBusy || !schedulerStatus}
-            className="rounded-md border border-cyan-300/40 px-3 py-2 text-xs font-semibold text-cyan-100 disabled:opacity-50"
-          >
-            {schedulerBusy ? "Dang toggle..." : schedulerStatus?.enabled ? "Tat Auto" : "Bat Auto"}
-          </button>
-        </div>
+        {accountTab === "demo" ? (
+          <div className="ml-auto flex items-center gap-2">
+            <span className="text-xs text-slate-400">
+              Auto {schedulerAccountMode}: {schedulerStatus?.enabled ? "ON" : "OFF"} /{" "}
+              {schedulerStatus?.running ? "RUNNING" : "STOPPED"}
+            </span>
+            <button
+              type="button"
+              onClick={() => void handleToggleScheduler()}
+              disabled={schedulerBusy || !schedulerStatus}
+              className="rounded-md border border-cyan-300/40 px-3 py-2 text-xs font-semibold text-cyan-100 disabled:opacity-50"
+            >
+              {schedulerBusy ? "Dang toggle..." : schedulerStatus?.enabled ? "Tat Auto" : "Bat Auto"}
+            </button>
+          </div>
+        ) : null}
       </div>
       {accountTab === "real" ? (
         <div className="flex flex-col gap-10">
@@ -1235,7 +1689,7 @@ export function AutoTradingClient() {
                 </div>
               </div>
             ) : (
-              <div className="mt-4 flex items-center">
+              <div className="mt-4 flex flex-wrap items-start justify-between gap-4">
                 <button
                   type="button"
                   onClick={handleDnseLogout}
@@ -1243,6 +1697,22 @@ export function AutoTradingClient() {
                 >
                   {UI_TEXT.dnse.sessionLogout}
                 </button>
+                <div className="w-full max-w-[220px] rounded-md border border-cyan-300/20 bg-cyan-300/5 p-3">
+                  <p className="text-xs font-semibold text-cyan-100">QR nap tien DNSE</p>
+                  {DNSE_DEPOSIT_QR_URL ? (
+                    <div className="mt-2 flex justify-center">
+                      <img
+                        src={DNSE_DEPOSIT_QR_URL}
+                        alt="DNSE deposit QR"
+                        className="h-40 w-40 rounded-md border border-white/10 bg-white p-1 object-contain"
+                      />
+                    </div>
+                  ) : (
+                    <p className="mt-2 text-[11px] text-slate-400">
+                      Chua cau hinh QR. Them `NEXT_PUBLIC_DNSE_DEPOSIT_QR_URL`.
+                    </p>
+                  )}
+                </div>
               </div>
             )}
             <div className="mt-4 border-t border-white/10 pt-4">
@@ -1330,6 +1800,7 @@ export function AutoTradingClient() {
                               <th className="py-1.5 pr-3">Qty</th>
                               <th className="py-1.5 pr-3">Avg</th>
                               <th className="py-1.5">Market</th>
+                              <th className="py-1.5">Action</th>
                             </tr>
                           </thead>
                           <tbody>
@@ -1338,7 +1809,17 @@ export function AutoTradingClient() {
                                 <td className="py-1.5 pr-3 font-mono text-cyan-100">{row.symbol}</td>
                                 <td className="py-1.5 pr-3">{row.quantity}</td>
                                 <td className="py-1.5 pr-3">{row.averagePrice != null ? formatPrice(row.averagePrice) : "-"}</td>
-                                <td className="py-1.5">{row.marketPrice != null ? formatPrice(row.marketPrice) : "-"}</td>
+                                <td className="py-1.5 pr-3">{row.marketPrice != null ? formatPrice(row.marketPrice) : "-"}</td>
+                                <td className="py-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleSellRealHolding(row)}
+                                    disabled={realHoldingSellBusySymbol === row.symbol}
+                                    className="rounded-md border border-amber-300/40 px-2 py-1 text-[11px] font-semibold text-amber-100 disabled:opacity-50"
+                                  >
+                                    {realHoldingSellBusySymbol === row.symbol ? "Dang ban..." : "Ban"}
+                                  </button>
+                                </td>
                               </tr>
                             ))}
                           </tbody>
@@ -1349,6 +1830,181 @@ export function AutoTradingClient() {
                 </div>
               ) : null}
             </div>
+            <div className="mt-4 rounded-md border border-white/10 bg-black/20 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs font-semibold text-slate-200">Lenh REAL dang dat nhung chua khop</p>
+                <button
+                  type="button"
+                  onClick={() => void handlePollRealPendingOrders()}
+                  disabled={realPendingOrdersBusy}
+                  className="rounded-md border border-cyan-300/40 px-2.5 py-1.5 text-[11px] font-semibold text-cyan-100 disabled:opacity-50"
+                >
+                  {realPendingOrdersBusy ? "Dang poll..." : "Poll DNSE"}
+                </button>
+              </div>
+              {realPendingOrdersError ? <p className="mt-2 text-[11px] text-rose-300">{realPendingOrdersError}</p> : null}
+              {realPendingOrders.length === 0 ? (
+                <p className="mt-2 text-[11px] text-slate-500">Khong co lenh pending (NEW/SENT/ACK/PARTIAL).</p>
+              ) : (
+                <div className="mt-2 max-h-52 overflow-y-auto overflow-x-auto">
+                  <table className="w-full min-w-[760px] text-left text-[11px] text-slate-200">
+                    <thead className="border-b border-white/10 text-slate-500">
+                      <tr>
+                        <th className="py-1.5 pr-3">Time</th>
+                        <th className="py-1.5 pr-3">Symbol</th>
+                        <th className="py-1.5 pr-3">Side</th>
+                        <th className="py-1.5 pr-3">Qty</th>
+                        <th className="py-1.5 pr-3">Price</th>
+                        <th className="py-1.5 pr-3">Status</th>
+                        <th className="py-1.5 pr-3">Broker ID</th>
+                        <th className="py-1.5">Reason</th>
+                        <th className="py-1.5">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {realPendingOrders.map((order) => (
+                        <tr key={order.id} className="border-b border-white/5">
+                          <td className="py-1.5 pr-3 text-slate-400">{formatDateTime(order.created_at)}</td>
+                          <td className="py-1.5 pr-3 font-mono text-cyan-100">{order.symbol}</td>
+                          <td className="py-1.5 pr-3">{order.side}</td>
+                          <td className="py-1.5 pr-3">{order.quantity}</td>
+                          <td className="py-1.5 pr-3">{formatPrice(order.price)}</td>
+                          <td className={`py-1.5 pr-3 ${statusClass(order.status)}`}>{order.status}</td>
+                          <td className="py-1.5 pr-3 font-mono text-slate-400">{order.broker_order_id || "-"}</td>
+                          <td className="py-1.5 pr-3 text-slate-500">{order.reason || "-"}</td>
+                          <td className="py-1.5">
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => void handleShowRealPendingOrderDetail(order)}
+                                disabled={realPendingDetailBusy && realPendingDetailOrderId === order.id}
+                                className="rounded-md border border-cyan-300/40 px-2 py-1 text-[11px] font-semibold text-cyan-100 disabled:opacity-50"
+                              >
+                                {realPendingDetailBusy && realPendingDetailOrderId === order.id ? "Dang tai..." : "Detail"}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleCancelRealPendingOrder(order.id)}
+                                disabled={realPendingCancelBusyOrderId === order.id}
+                                className="rounded-md border border-rose-300/40 px-2 py-1 text-[11px] font-semibold text-rose-200 disabled:opacity-50"
+                              >
+                                {realPendingCancelBusyOrderId === order.id ? "Dang huy..." : "Huy lenh"}
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {realPendingDetailOrderId ? (
+                <div className="mt-3 rounded-md border border-cyan-300/20 bg-cyan-300/5 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-[11px] font-semibold text-cyan-100">
+                      Detail lenh dang dat: <span className="font-mono">{realPendingDetailOrderId}</span>
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRealPendingDetailOrderId("");
+                        setRealPendingDetailEvents([]);
+                        setRealPendingDetailError("");
+                      }}
+                      className="rounded-md border border-white/15 px-2 py-1 text-[11px] text-slate-300"
+                    >
+                      Dong
+                    </button>
+                  </div>
+                  {realPendingDetailError ? <p className="mt-2 text-[11px] text-rose-300">{realPendingDetailError}</p> : null}
+                  {realPendingDetailBusy ? (
+                    <p className="mt-2 text-[11px] text-slate-400">Dang tai timeline events...</p>
+                  ) : realPendingDetailEvents.length === 0 ? (
+                    <p className="mt-2 text-[11px] text-slate-500">Chua co event cho lenh nay.</p>
+                  ) : (
+                    <div className="mt-2 max-h-44 overflow-y-auto text-[11px] font-mono text-slate-300">
+                      {realPendingDetailEvents.map((event) => (
+                        <div key={event.id} className="border-b border-white/5 py-1.5">
+                          <p>
+                            <span className="text-cyan-200">{formatDateTime(event.created_at)}</span> |{" "}
+                            <span className={statusClass(event.status)}>{event.status}</span>
+                          </p>
+                          <p className="text-slate-400">{event.message || "-"}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ) : null}
+            </div>
+          </section>
+
+          <section className="glass-panel rounded-2xl p-6">
+            <div className="flex flex-wrap items-end justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-slate-200">REAL Recommendations (scan-only)</h3>
+                <p className="mt-1 text-xs text-slate-500">
+                  Scan xong se chi luu khuyen nghi vao Redis, khong tu dong dat lenh mua.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleScanRealRecommendations()}
+                disabled={realRecommendationsBusy || !sessionActive}
+                className="rounded-md border border-cyan-300/40 px-3 py-2 text-xs font-semibold text-cyan-100 disabled:opacity-50"
+              >
+                {realRecommendationsBusy ? "Dang scan recommendations..." : "Scan recommendations"}
+              </button>
+            </div>
+            {realRecommendationsError ? <p className="mt-2 text-xs text-rose-300">{realRecommendationsError}</p> : null}
+            {realRecommendationsGeneratedAt ? (
+              <p className="mt-2 text-[11px] text-slate-500">Generated: {formatDateTime(realRecommendationsGeneratedAt)}</p>
+            ) : null}
+            {realRecommendations.length === 0 ? (
+              <p className="mt-3 text-xs text-slate-500">Chua co khuyen nghi BUY trong Redis.</p>
+            ) : (
+              <div className="mt-3 overflow-x-auto">
+                <table className="w-full min-w-[920px] text-left text-xs text-slate-200">
+                  <thead className="border-b border-white/10 uppercase tracking-wide text-slate-500">
+                    <tr>
+                      <th className="py-2.5 pr-4 whitespace-nowrap">Symbol</th>
+                      <th className="py-2.5 pr-4 whitespace-nowrap">Entry</th>
+                      <th className="py-2.5 pr-4 whitespace-nowrap">Take profit</th>
+                      <th className="py-2.5 pr-4 whitespace-nowrap">Stop loss</th>
+                      <th className="py-2.5 pr-4 whitespace-nowrap">Confidence</th>
+                      <th className="py-2.5 pr-4 whitespace-nowrap">Reason</th>
+                      <th className="py-2.5 whitespace-nowrap">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {realRecommendations.map((item, idx) => (
+                      <tr key={`${item.symbol}-${idx}`} className="border-b border-white/5 align-top">
+                        <td className="py-2 pr-3 font-mono text-cyan-200">{item.symbol}</td>
+                        <td className="py-2 pr-3 text-slate-100">{formatPrice(item.entry)}</td>
+                        <td className="py-2 pr-3 text-emerald-300">{formatPrice(item.take_profit)}</td>
+                        <td className="py-2 pr-3 text-rose-300">{formatPrice(item.stop_loss)}</td>
+                        <td className="py-2 pr-3 text-amber-300">{Number(item.confidence || 0).toFixed(1)}%</td>
+                        <td className="py-2 pr-3 text-slate-300">{item.reason || "-"}</td>
+                        <td className="py-2">
+                          <button
+                            type="button"
+                            onClick={() => void handleActionBuyRealRecommendation(item)}
+                            disabled={
+                              !sessionActive ||
+                              realRecommendationBuyBusySymbol === item.symbol ||
+                              !Number.isFinite(Number(dnseAccountSummary?.tradableCash ?? 0))
+                            }
+                            className="rounded-md border border-emerald-300/40 px-2.5 py-1.5 text-[11px] font-semibold text-emerald-100 disabled:opacity-50"
+                          >
+                            {realRecommendationBuyBusySymbol === item.symbol ? "Dang mua..." : "Action Buy"}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </section>
 
           <section className="glass-panel rounded-2xl p-6">
@@ -1432,6 +2088,69 @@ export function AutoTradingClient() {
             )}
           </section>
 
+          <section className="glass-panel rounded-2xl p-6">
+            <h3 className="text-sm font-semibold text-slate-200">Real Scan Logs (Short-term + Mail Signals)</h3>
+            <p className="mt-1 text-xs text-slate-500">Chi hien thi log account_mode REAL, 10 ban ghi gan nhat moi loai.</p>
+            <div className="mt-3 grid gap-4 lg:grid-cols-2">
+              <div className="rounded-md border border-white/10 bg-black/20 p-3">
+                <div className="flex flex-wrap items-end justify-between gap-2">
+                  <p className="text-xs font-semibold text-slate-300">Short-term scan logs (REAL)</p>
+                  <label className="flex flex-col gap-1 text-[11px] text-slate-400">
+                    Exchange scope
+                    <select
+                      className="rounded-md border border-white/15 bg-black/30 px-2 py-1 font-mono text-[11px] text-slate-100"
+                      value={realShortTermLogScopeFilter}
+                      onChange={(e) => setRealShortTermLogScopeFilter(e.target.value as "ANY" | ShortTermExchangeScope)}
+                    >
+                      <option value="ANY">ANY</option>
+                      <option value="ALL">ALL</option>
+                      <option value="HOSE">HOSE</option>
+                      <option value="HNX">HNX</option>
+                      <option value="UPCOM">UPCOM</option>
+                    </select>
+                  </label>
+                </div>
+                {realShortTermRuns.length === 0 ? (
+                  <p className="mt-2 text-[11px] text-slate-500">Chua co log short-term REAL.</p>
+                ) : (
+                  <div className="mt-2 max-h-72 space-y-2 overflow-y-auto text-[11px] font-mono text-slate-300">
+                    {realShortTermRuns.map((run) => (
+                      <div key={run.id} className="border-b border-white/5 pb-2">
+                        <p>
+                          <span className="text-cyan-200">{formatDateTime(run.started_at)}</span> |{" "}
+                          <span className={automationRunStatusClass(run.run_status)}>{run.run_status}</span>
+                        </p>
+                        <p className="text-slate-400">
+                          scan={run.scanned} | buy={run.buy_candidates} | exec={run.executed} | err={run.errors}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div className="rounded-md border border-white/10 bg-black/20 p-3">
+                <p className="text-xs font-semibold text-slate-300">Mail signals logs (REAL)</p>
+                {realMailSignalRunLogs.length === 0 ? (
+                  <p className="mt-2 text-[11px] text-slate-500">Chua co log mail signals REAL.</p>
+                ) : (
+                  <div className="mt-2 max-h-72 space-y-2 overflow-y-auto text-[11px] font-mono text-slate-300">
+                    {realMailSignalRunLogs.map((run, idx) => (
+                      <div key={`${run.redis_key}-${idx}`} className="border-b border-white/5 pb-2">
+                        <p>
+                          <span className="text-cyan-200">{formatDateTime(run.ran_at)}</span> |{" "}
+                          <span className="text-violet-300">scanned={run.scanned}</span> |{" "}
+                          <span className="text-emerald-300">executed={run.executed.length}</span> |{" "}
+                          <span className="text-rose-300">skipped={run.skipped.length}</span>
+                        </p>
+                        <p className="text-slate-500">source={run.source_key || "-"}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </section>
+
         </div>
       ) : (
         <div className="flex flex-col gap-8">
@@ -1501,175 +2220,142 @@ export function AutoTradingClient() {
               <p className="font-semibold text-slate-200">Demo DB Overview</p>
               {demoOverviewError ? <p className="mt-2 text-rose-300">{demoOverviewError}</p> : null}
               {demoOverview ? (
-                <div className="mt-3 space-y-3">
-                  <div className="grid gap-2 md:grid-cols-3">
-                    <div className="rounded-md border border-emerald-300/25 bg-emerald-300/10 p-3">
-                      <p className="text-[11px] uppercase tracking-wide text-emerald-100/80">Tien mat con du</p>
-                      <p className="mt-1 text-lg font-semibold text-emerald-50">
-                        {formatVnd(demoPortfolioSnapshot.cashAvailable)} VND
-                      </p>
-                    </div>
-                    <div className="rounded-md border border-violet-300/25 bg-violet-300/10 p-3">
-                      <p className="text-[11px] uppercase tracking-wide text-violet-100/80">Gia tri co phieu</p>
-                      <p className="mt-1 text-lg font-semibold text-violet-50">
-                        {formatVnd(demoPortfolioSnapshot.stockValue)} VND
-                      </p>
-                    </div>
-                    <div className="rounded-md border border-cyan-300/20 bg-cyan-300/5 p-3">
-                      <p className="text-[11px] uppercase tracking-wide text-cyan-100/80">Realized PnL</p>
-                      <p
-                        className={`mt-1 text-lg font-semibold ${
-                          Number(demoOverview.realized_pnl || 0) >= 0 ? "text-emerald-200" : "text-rose-200"
-                        }`}
-                      >
-                        {formatVnd(Number(demoOverview.realized_pnl || 0))} VND
-                      </p>
-                    </div>
+                <div className="mt-3 grid gap-2 md:grid-cols-2">
+                  <div className="rounded-md border border-slate-300/20 bg-slate-300/10 p-3">
+                    <p className="text-[11px] uppercase tracking-wide text-slate-200/80">So tien nap vao</p>
+                    <p className="mt-1 text-lg font-semibold text-slate-100">
+                      {formatVnd(Number(demoOverview.initial_balance || 0))} VND
+                    </p>
                   </div>
-                  <div className="grid gap-2 md:grid-cols-3">
-                    <div className="rounded-md border border-slate-300/20 bg-slate-300/10 p-3">
-                      <p className="text-[11px] uppercase tracking-wide text-slate-200/80">Tong von ban dau</p>
-                      <p className="mt-1 text-lg font-semibold text-slate-100">
-                        {formatVnd(Number(demoOverview.initial_balance || 0))} VND
-                      </p>
-                    </div>
-                    <div className="rounded-md border border-cyan-300/20 bg-cyan-300/5 p-3">
-                      <p className="text-[11px] uppercase tracking-wide text-cyan-100/80">Tong von hien tai</p>
-                      <p className="mt-1 text-lg font-semibold text-cyan-100">
-                        {formatVnd(Number(demoPortfolioSnapshot.totalAssets || 0))} VND
-                      </p>
-                    </div>
-                    <div className="rounded-md border border-amber-300/20 bg-amber-300/5 p-3">
-                      <p className="text-[11px] uppercase tracking-wide text-amber-100/80">Chenh lech lai/lo</p>
-                      <p
-                        className={`mt-1 text-lg font-semibold ${
-                          Number(demoPortfolioSnapshot.totalAssets || 0) - Number(demoOverview.initial_balance || 0) >= 0
-                            ? "text-emerald-200"
-                            : "text-rose-200"
-                        }`}
-                      >
-                        {formatVnd(
-                          Number(demoPortfolioSnapshot.totalAssets || 0) - Number(demoOverview.initial_balance || 0),
-                        )}{" "}
-                        VND
-                      </p>
-                    </div>
+                  <div className="rounded-md border border-cyan-300/20 bg-cyan-300/5 p-3">
+                    <p className="text-[11px] uppercase tracking-wide text-cyan-100/80">Tong tien hien tai</p>
+                    <p className="mt-1 text-lg font-semibold text-cyan-100">
+                      {formatVnd(Number(demoOverview.total_assets || 0))} VND
+                    </p>
                   </div>
-                  <div className="space-y-1">
-                  <p>
-                    Active: {demoOverview.is_active ? "true" : "false"} | Trades: {demoOverview.trade_count} | Holdings:{" "}
-                    {demoOverview.holdings_count}
-                  </p>
-                  <p>Updated: {formatDateTime(demoOverview.updated_at)}</p>
+                  <div className="rounded-md border border-emerald-300/25 bg-emerald-300/10 p-3">
+                    <p className="text-[11px] uppercase tracking-wide text-emerald-100/80">Tien mat con du</p>
+                    <p className="mt-1 text-lg font-semibold text-emerald-50">
+                      {formatVnd(demoPortfolioSnapshot.cashAvailable)} VND
+                    </p>
                   </div>
-                  <div className="grid gap-3 lg:grid-cols-2">
-                    <div className="rounded-md border border-white/10 bg-black/20 p-3">
-                      <p className="mb-2 text-xs font-semibold text-slate-300">Ty trong tai san</p>
-                      <div className="h-56">
-                        <ResponsiveContainer width="100%" height="100%">
-                          <PieChart>
-                            <Pie
-                              data={overviewDonutData}
-                              dataKey="value"
-                              nameKey="name"
-                              innerRadius={54}
-                              outerRadius={82}
-                              paddingAngle={2}
-                            >
-                              {overviewDonutData.map((entry, idx) => (
-                                <Cell key={`${entry.name}-${idx}`} fill={OVERVIEW_DONUT_COLORS[idx % OVERVIEW_DONUT_COLORS.length]} />
-                              ))}
-                            </Pie>
-                            <Tooltip
-                              contentStyle={{
-                                background: "rgba(8, 13, 23, 0.96)",
-                                border: "1px solid rgba(148, 163, 184, 0.35)",
-                                borderRadius: "10px",
-                                color: "#e6edf7",
-                              }}
-                              formatter={(value) => [`${formatVnd(Number(value || 0))} VND`, "Gia tri"]}
-                            />
-                          </PieChart>
-                        </ResponsiveContainer>
-                      </div>
-                      <div className="grid grid-cols-2 gap-2 text-[11px] text-slate-400">
-                        {overviewDonutData.map((item, idx) => (
-                          <p key={item.name}>
-                            <span style={{ color: OVERVIEW_DONUT_COLORS[idx % OVERVIEW_DONUT_COLORS.length] }}>●</span> {item.name}:{" "}
-                            {formatVnd(item.value)} VND
-                          </p>
-                        ))}
-                      </div>
-                    </div>
-                    <div className="rounded-md border border-white/10 bg-black/20 p-3">
-                      <p className="mb-2 text-xs font-semibold text-slate-300">Top holdings theo gia tri</p>
-                      <div className="h-56">
-                        {overviewHoldingsBarData.length === 0 ? (
-                          <div className="flex h-full items-center justify-center text-xs text-slate-500">
-                            Khong co du lieu holdings.
-                          </div>
-                        ) : (
-                          <ResponsiveContainer width="100%" height="100%">
-                            <BarChart data={overviewHoldingsBarData}>
-                              <XAxis
-                                dataKey="symbol"
-                                tick={{ fill: "#94a3b8", fontSize: 11 }}
-                                tickLine={false}
-                                axisLine={false}
-                              />
-                              <YAxis
-                                tick={{ fill: "#94a3b8", fontSize: 11 }}
-                                tickLine={false}
-                                axisLine={false}
-                                tickFormatter={(v: number) => formatVnd(Number(v || 0))}
-                              />
-                              <Tooltip
-                                contentStyle={{
-                                  background: "rgba(8, 13, 23, 0.96)",
-                                  border: "1px solid rgba(148, 163, 184, 0.35)",
-                                  borderRadius: "10px",
-                                  color: "#e6edf7",
-                                }}
-                                formatter={(value) => [`${formatVnd(Number(value || 0))} VND`, "Gia tri"]}
-                              />
-                              <Bar dataKey="value" fill={HOLDINGS_BAR_COLOR} radius={[6, 6, 0, 0]} />
-                            </BarChart>
-                          </ResponsiveContainer>
-                        )}
-                      </div>
-                    </div>
+                  <div className="rounded-md border border-violet-300/25 bg-violet-300/10 p-3">
+                    <p className="text-[11px] uppercase tracking-wide text-violet-100/80">Gia tri co phieu</p>
+                    <p className="mt-1 text-lg font-semibold text-violet-50">
+                      {formatVnd(Number(demoOverview.stock_value || 0))} VND
+                    </p>
                   </div>
-                  {demoOverview.holdings.length > 0 ? (
-                    <ul className="mt-2 space-y-1">
-                      {demoOverview.holdings.map((holding) => {
-                        const symbol = String(holding.symbol || "").toUpperCase();
-                        const last = Number(holdingLastPriceBySymbol[symbol] ?? 0);
-                        const avg = Number(holding.average_buy_price || 0);
-                        const hasMark = Number.isFinite(last) && last > 0;
-                        const toneClass = hasMark
-                          ? last > avg
-                            ? "text-emerald-300"
-                            : last < avg
-                              ? "text-rose-300"
-                              : "text-slate-300"
-                          : "text-slate-300";
-                        const pnlPct = hasMark && avg > 0 ? ((last / avg - 1) * 100).toFixed(2) : null;
-                        return (
-                          <li key={`${holding.symbol}-${holding.opened_at}`} className={`font-mono ${toneClass}`}>
-                            {holding.symbol} | qty {holding.quantity} | avg {formatPrice(holding.average_buy_price)} |{" "}
-                            mark {hasMark ? formatPrice(last) : "-"} {pnlPct ? `(${Number(pnlPct) > 0 ? "+" : ""}${pnlPct}%)` : ""}
-                            {" | "}
-                            {formatDateTime(holding.opened_at)}
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  ) : (
-                    <p className="mt-2 text-slate-500">Khong co ma dang nam giu.</p>
-                  )}
                 </div>
               ) : null}
             </div>
+          </section>
+
+          <section className="glass-panel rounded-2xl p-6">
+            <h3 className="text-sm font-semibold text-slate-200">Demo Charts</h3>
+            <div className="mt-3 grid gap-3 lg:grid-cols-2">
+              <div className="rounded-md border border-white/10 bg-black/20 p-3">
+                <p className="mb-2 text-xs font-semibold text-slate-300">Ty trong tai san</p>
+                <div className="h-56">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie data={overviewDonutData} dataKey="value" nameKey="name" innerRadius={54} outerRadius={82} paddingAngle={2}>
+                        {overviewDonutData.map((entry, idx) => (
+                          <Cell key={`${entry.name}-${idx}`} fill={OVERVIEW_DONUT_COLORS[idx % OVERVIEW_DONUT_COLORS.length]} />
+                        ))}
+                      </Pie>
+                      <Tooltip
+                        contentStyle={{
+                          background: "rgba(8, 13, 23, 0.96)",
+                          border: "1px solid rgba(148, 163, 184, 0.35)",
+                          borderRadius: "10px",
+                          color: "#e6edf7",
+                        }}
+                        formatter={(value) => [`${formatVnd(Number(value || 0))} VND`, "Gia tri"]}
+                      />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-[11px] text-slate-400">
+                  {overviewDonutData.map((item, idx) => (
+                    <p key={item.name}>
+                      <span style={{ color: OVERVIEW_DONUT_COLORS[idx % OVERVIEW_DONUT_COLORS.length] }}>●</span> {item.name}:{" "}
+                      {formatVnd(item.value)} VND
+                    </p>
+                  ))}
+                </div>
+              </div>
+              <div className="rounded-md border border-white/10 bg-black/20 p-3">
+                <p className="mb-2 text-xs font-semibold text-slate-300">Top holdings theo gia tri</p>
+                <div className="h-56">
+                  {overviewHoldingsBarData.length === 0 ? (
+                    <div className="flex h-full items-center justify-center text-xs text-slate-500">Khong co du lieu holdings.</div>
+                  ) : (
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={overviewHoldingsBarData}>
+                        <XAxis dataKey="symbol" tick={{ fill: "#94a3b8", fontSize: 11 }} tickLine={false} axisLine={false} />
+                        <YAxis
+                          tick={{ fill: "#94a3b8", fontSize: 11 }}
+                          tickLine={false}
+                          axisLine={false}
+                          tickFormatter={(v: number) => formatVnd(normalizeVnStockPrice(Number(v || 0)))}
+                        />
+                        <Tooltip
+                          contentStyle={{
+                            background: "rgba(8, 13, 23, 0.96)",
+                            border: "1px solid rgba(148, 163, 184, 0.35)",
+                            borderRadius: "10px",
+                            color: "#e6edf7",
+                          }}
+                          formatter={(value) => [`${formatVnd(normalizeVnStockPrice(Number(value || 0)))} VND`, "Gia tri"]}
+                        />
+                        <Bar dataKey="value" fill={HOLDINGS_BAR_COLOR} radius={[6, 6, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  )}
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section className="glass-panel rounded-2xl p-6">
+            <h3 className="text-sm font-semibold text-slate-200">Danh muc demo session hien tai</h3>
+            {!demoOverview || demoOverview.holdings.length === 0 ? (
+              <p className="mt-3 text-xs text-slate-500">Khong co ma dang nam giu trong demo session nay.</p>
+            ) : (
+              <div className="mt-3 overflow-x-auto">
+                <table className="w-full min-w-[720px] text-left text-xs text-slate-200">
+                  <thead className="border-b border-white/10 uppercase tracking-wide text-slate-500">
+                    <tr>
+                      <th className="py-2.5 pr-4 whitespace-nowrap">Symbol</th>
+                      <th className="py-2.5 pr-4 whitespace-nowrap">So luong</th>
+                      <th className="py-2.5 pr-4 whitespace-nowrap">Gia mua</th>
+                      <th className="py-2.5 pr-4 whitespace-nowrap">Gia hien tai</th>
+                      <th className="py-2.5 whitespace-nowrap">% Lai/Lo</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {demoOverview.holdings.map((holding) => {
+                      const symbol = String(holding.symbol || "").toUpperCase();
+                      const avg = normalizeVnStockPrice(Number(holding.average_buy_price || 0));
+                      const last = normalizeVnStockPrice(Number(holdingLastPriceBySymbol[symbol] ?? 0));
+                      const hasMark = Number.isFinite(last) && last > 0;
+                      const pnlPct = hasMark && avg > 0 ? (last / avg - 1) * 100 : null;
+                      const pnlClass =
+                        pnlPct == null ? "text-slate-400" : pnlPct > 0 ? "text-emerald-300" : pnlPct < 0 ? "text-rose-300" : "text-slate-300";
+                      return (
+                        <tr key={`${holding.symbol}-${holding.opened_at}`} className="border-b border-white/5">
+                          <td className="py-2 pr-3 font-mono text-cyan-200">{symbol}</td>
+                          <td className="py-2 pr-3">{Number(holding.quantity || 0)}</td>
+                          <td className="py-2 pr-3">{formatPrice(avg)}</td>
+                          <td className="py-2 pr-3">{hasMark ? formatPrice(last) : "-"}</td>
+                          <td className={`py-2 ${pnlClass}`}>{pnlPct == null ? "-" : `${pnlPct > 0 ? "+" : ""}${pnlPct.toFixed(2)}%`}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </section>
 
           <section className="glass-panel rounded-2xl p-6">
@@ -1916,52 +2602,67 @@ export function AutoTradingClient() {
               <p className="mt-2 text-slate-500">Chua co run log.</p>
             ) : (
               <div className="mt-2 space-y-3">
-                {automationRunLogGroups.map((group, idx) => (
-                  <div key={group.bucket}>
-                    <p
-                      className={`text-[11px] font-semibold uppercase tracking-wide text-slate-500 ${
-                        idx > 0 ? "border-t border-white/10 pt-2" : ""
-                      }`}
-                    >
-                      {group.bucket === "OTHER" ? "Other / legacy" : group.bucket} · {group.runs.length} run
-                      {group.runs.length === 1 ? "" : "s"}
-                    </p>
-                    <div className="mt-1 space-y-1">
-                      {group.runs.map((run) => (
-                        <div key={run.id} className="font-mono">
-                          <p>
-                            <span className="text-cyan-200">{formatDateTime(run.started_at)}</span> |{" "}
-                            <span className={automationRunStatusClass(run.run_status)}>{run.run_status}</span> | scan{" "}
-                            <span className="text-violet-300">{run.scanned}</span> | buy{" "}
-                            <span className="text-amber-300">{run.buy_candidates}</span> | exec{" "}
-                            <span className="text-emerald-300">{run.executed}</span> | err{" "}
-                            <span className={run.errors > 0 ? "text-rose-300" : "text-slate-400"}>{run.errors}</span>
+                {automationRunLogGroups.map((sessionBlock, sessionIdx) => (
+                  <div key={sessionBlock.sessionId ?? "ACCOUNT_MODE_SCOPE"}>
+                    {sessionBlock.sessionId ? (
+                      <p
+                        className={`text-[11px] font-semibold uppercase tracking-wide text-cyan-300 ${
+                          sessionIdx > 0 ? "border-t border-white/10 pt-3" : ""
+                        }`}
+                      >
+                        DEMO_SESSION_ID: {sessionBlock.sessionId}
+                      </p>
+                    ) : null}
+                    <div className="mt-1 space-y-3">
+                      {sessionBlock.groups.map((group, idx) => (
+                        <div key={`${sessionBlock.sessionId ?? "ACCOUNT_MODE_SCOPE"}-${group.bucket}`}>
+                          <p
+                            className={`text-[11px] font-semibold uppercase tracking-wide text-slate-500 ${
+                              idx > 0 ? "border-t border-white/10 pt-2" : ""
+                            }`}
+                          >
+                            {group.bucket === "OTHER" ? "Other / legacy" : group.bucket} · {group.runs.length} run
+                            {group.runs.length === 1 ? "" : "s"}
                           </p>
-                          <p className="text-[11px] text-slate-500">
-                            {(() => {
-                              const detail = run.detail ?? {};
-                              const skippedEntryGate = asFiniteNumber(detail.skipped_entry_gate);
-                              const skippedCooldown = asFiniteNumber(detail.skipped_experience_cooldown);
-                              const skippedDynamicFloor = asFiniteNumber(detail.skipped_dynamic_buy_floor);
-                              const dynamicFloor = asFiniteNumber(detail.dynamic_buy_composite_floor);
-                              const thresholdSourceClaude = asFiniteNumber(detail.experience_threshold_source_claude);
-                              const thresholdSourceHeuristic = asFiniteNumber(detail.experience_threshold_source_heuristic);
-                              const decisionMeta = (detail.buy_decision_meta ?? {}) as Record<string, unknown>;
-                              const decisionSource = typeof decisionMeta.source === "string" ? decisionMeta.source : "-";
-                              const plannedSpent = asFiniteNumber(decisionMeta.planned_spent);
-                              const actualSpent = asFiniteNumber(decisionMeta.actual_spent);
-                              const executionGap = asFiniteNumber(decisionMeta.execution_spent_gap);
-                              return [
-                                `entry_gate_skip=${skippedEntryGate ?? 0}`,
-                                `cooldown_skip=${skippedCooldown ?? 0}`,
-                                `dynamic_floor_skip=${skippedDynamicFloor ?? 0}`,
-                                `dynamic_floor=${dynamicFloor != null ? dynamicFloor.toFixed(1) : "-"}`,
-                                `threshold_source=claude:${thresholdSourceClaude ?? 0}/heuristic:${thresholdSourceHeuristic ?? 0}`,
-                                `spent(plan/actual/gap)=${plannedSpent ?? 0}/${actualSpent ?? 0}/${executionGap ?? 0}`,
-                                `decision=${decisionSource}`,
-                              ].join(" | ");
-                            })()}
-                          </p>
+                          <div className="mt-1 space-y-1">
+                            {group.runs.map((run) => (
+                              <div key={run.id} className="font-mono">
+                                <p>
+                                  <span className="text-cyan-200">{formatDateTime(run.started_at)}</span> |{" "}
+                                  <span className={automationRunStatusClass(run.run_status)}>{run.run_status}</span> | scan{" "}
+                                  <span className="text-violet-300">{run.scanned}</span> | buy{" "}
+                                  <span className="text-amber-300">{run.buy_candidates}</span> | exec{" "}
+                                  <span className="text-emerald-300">{run.executed}</span> | err{" "}
+                                  <span className={run.errors > 0 ? "text-rose-300" : "text-slate-400"}>{run.errors}</span>
+                                </p>
+                                <p className="text-[11px] text-slate-500">
+                                  {(() => {
+                                    const detail = run.detail ?? {};
+                                    const skippedEntryGate = asFiniteNumber(detail.skipped_entry_gate);
+                                    const skippedCooldown = asFiniteNumber(detail.skipped_experience_cooldown);
+                                    const skippedDynamicFloor = asFiniteNumber(detail.skipped_dynamic_buy_floor);
+                                    const dynamicFloor = asFiniteNumber(detail.dynamic_buy_composite_floor);
+                                    const thresholdSourceClaude = asFiniteNumber(detail.experience_threshold_source_claude);
+                                    const thresholdSourceHeuristic = asFiniteNumber(detail.experience_threshold_source_heuristic);
+                                    const decisionMeta = (detail.buy_decision_meta ?? {}) as Record<string, unknown>;
+                                    const decisionSource = typeof decisionMeta.source === "string" ? decisionMeta.source : "-";
+                                    const plannedSpent = asFiniteNumber(decisionMeta.planned_spent);
+                                    const actualSpent = asFiniteNumber(decisionMeta.actual_spent);
+                                    const executionGap = asFiniteNumber(decisionMeta.execution_spent_gap);
+                                    return [
+                                      `entry_gate_skip=${skippedEntryGate ?? 0}`,
+                                      `cooldown_skip=${skippedCooldown ?? 0}`,
+                                      `dynamic_floor_skip=${skippedDynamicFloor ?? 0}`,
+                                      `dynamic_floor=${dynamicFloor != null ? dynamicFloor.toFixed(1) : "-"}`,
+                                      `threshold_source=claude:${thresholdSourceClaude ?? 0}/heuristic:${thresholdSourceHeuristic ?? 0}`,
+                                      `spent(plan/actual/gap)=${plannedSpent ?? 0}/${actualSpent ?? 0}/${executionGap ?? 0}`,
+                                      `decision=${decisionSource}`,
+                                    ].join(" | ");
+                                  })()}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -2013,69 +2714,53 @@ export function AutoTradingClient() {
           </section>
 
           <section className="glass-panel rounded-2xl p-6">
-            <h3 className="text-sm font-semibold text-slate-200">Mail Entry Scheduler Log (Latest)</h3>
+            <h3 className="text-sm font-semibold text-slate-200">Mail Entry Scheduler Log (10 gan nhat)</h3>
             {mailSignalEntryRunError ? <p className="mt-2 text-xs text-rose-300">{mailSignalEntryRunError}</p> : null}
-            {!mailSignalEntryRun ? (
+            {mailSignalEntryRuns.length === 0 ? (
               <p className="mt-3 text-xs text-slate-500">Chua co log entry scheduler.</p>
             ) : (
-              <div className="mt-3 space-y-3 text-xs text-slate-300">
-                <p>
-                  Ran at: <span className="text-cyan-200">{formatDateTime(mailSignalEntryRun.ran_at)}</span> | Scanned:{" "}
-                  <span className="text-violet-300">{mailSignalEntryRun.scanned}</span> | Executed:{" "}
-                  <span className="text-emerald-300">{mailSignalEntryRun.executed.length}</span> | Skipped:{" "}
-                  <span className="text-rose-300">{mailSignalEntryRun.skipped.length}</span>
-                </p>
-                {mailSignalEntryRun.executed.length === 0 ? (
-                  <p className="text-slate-500">Chua co lenh nao duoc ban trong lan chay gan nhat.</p>
-                ) : (
-                  <div className="overflow-x-auto">
-                    <table className="w-full min-w-[620px] text-left text-xs text-slate-200">
-                      <thead className="border-b border-white/10 uppercase text-slate-500">
-                        <tr>
-                          <th className="py-2 pr-3">Symbol</th>
-                          <th className="py-2 pr-3">Quantity</th>
-                          <th className="py-2 pr-3">Status</th>
-                          <th className="py-2 pr-3">Order ID</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {mailSignalEntryRun.executed.map((row, idx) => (
-                          <tr key={`${row.symbol}-${idx}`} className="border-b border-white/5">
-                            <td className="py-2 pr-3 font-mono text-cyan-200">{row.symbol}</td>
-                            <td className="py-2 pr-3">{Number(row.quantity || 0)}</td>
-                            <td className={`py-2 pr-3 ${statusClass(String(row.status || "-"))}`}>{row.status || "-"}</td>
-                            <td className="py-2 pr-3 font-mono">{row.order_id || "-"}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+              <div className="mt-3 space-y-4 text-xs text-slate-300">
+                {mailSignalEntryRuns.map((run, runIdx) => (
+                  <div key={`${run.redis_key}-${runIdx}`} className="rounded-md border border-white/10 bg-black/20 p-3">
+                    <p>
+                      Ran at: <span className="text-cyan-200">{formatDateTime(run.ran_at)}</span> | Scanned:{" "}
+                      <span className="text-violet-300">{run.scanned}</span> | Executed:{" "}
+                      <span className="text-emerald-300">{run.executed.length}</span> | Skipped:{" "}
+                      <span className="text-rose-300">{run.skipped.length}</span>
+                    </p>
+                    {run.executed.length === 0 ? (
+                      <p className="mt-2 text-slate-500">Khong co lenh duoc ban trong lan chay nay.</p>
+                    ) : (
+                      <div className="mt-2 overflow-x-auto">
+                        <table className="w-full min-w-[620px] text-left text-xs text-slate-200">
+                          <thead className="border-b border-white/10 uppercase text-slate-500">
+                            <tr>
+                              <th className="py-2 pr-3">Symbol</th>
+                              <th className="py-2 pr-3">Quantity</th>
+                              <th className="py-2 pr-3">Status</th>
+                              <th className="py-2 pr-3">Order ID</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {run.executed.map((row, idx) => (
+                              <tr key={`${row.symbol}-${idx}`} className="border-b border-white/5">
+                                <td className="py-2 pr-3 font-mono text-cyan-200">{row.symbol}</td>
+                                <td className="py-2 pr-3">{Number(row.quantity || 0)}</td>
+                                <td className={`py-2 pr-3 ${statusClass(String(row.status || "-"))}`}>{row.status || "-"}</td>
+                                <td className="py-2 pr-3 font-mono">{row.order_id || "-"}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
                   </div>
-                )}
+                ))}
               </div>
             )}
           </section>
 
-          <div className="grid gap-6 lg:grid-cols-2">
-            <section className="glass-panel rounded-2xl p-6">
-              <h3 className="text-sm font-semibold text-slate-200">{UI_TEXT.autoTrading.demoPositionsTitle}</h3>
-              {demoPositions.length === 0 ? (
-                <p className="mt-3 text-xs text-slate-500">{UI_TEXT.autoTrading.demoPositionsEmpty}</p>
-              ) : (
-                <ul className="mt-3 space-y-2 text-sm text-slate-300">
-                  {demoPositions.map((pos) => (
-                    <li
-                      key={`${pos.symbol}-${pos.opened_at}`}
-                      className="flex justify-between border-b border-white/5 py-1 font-mono text-xs"
-                    >
-                      <span>{pos.symbol}</span>
-                      <span>
-                        {pos.quantity} @ {formatPrice(pos.average_cost)}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
+          <div>
             <section className="glass-panel rounded-2xl p-6">
               <h3 className="text-sm font-semibold text-slate-200">{UI_TEXT.autoTrading.demoOrdersTitle}</h3>
               <p className="mt-1 text-xs text-slate-500">
@@ -2107,14 +2792,6 @@ export function AutoTradingClient() {
               ) : null}
             </section>
           </div>
-
-          <section className="glass-panel rounded-2xl p-6">
-            <h3 className="text-sm font-semibold text-slate-200">{UI_TEXT.autoTrading.demoLogTitle}</h3>
-            <p className="mt-1 text-xs text-slate-500">Unrealized PnL: {formatVnd(demoUnrealizedPnl)} VND</p>
-            <pre className="mt-3 max-h-56 overflow-y-auto whitespace-pre-wrap rounded-md bg-black/40 p-3 font-mono text-[11px] text-slate-400">
-              {demoLog.length === 0 ? UI_TEXT.autoTrading.demoLogEmpty : demoLog.join("\n")}
-            </pre>
-          </section>
         </div>
       )}
     </div>

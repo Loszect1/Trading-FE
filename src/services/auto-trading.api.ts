@@ -83,6 +83,7 @@ export interface DemoHoldingOverviewItem {
   symbol: string;
   quantity: number;
   average_buy_price: number;
+  position_value: number;
   opened_at: string;
 }
 
@@ -99,6 +100,8 @@ export interface DemoSessionOverviewData {
   is_active: boolean;
   initial_balance: number;
   cash_balance: number;
+  stock_value: number;
+  total_assets: number;
   realized_pnl: number;
   trade_count: number;
   holdings_count: number;

@@ -25,6 +25,8 @@ export interface CoreOrderRow {
   status: string;
   reason?: string | null;
   idempotency_key?: string | null;
+  broker_order_id?: string | null;
+  order_metadata?: Record<string, unknown>;
   created_at: string;
   updated_at?: string;
 }
@@ -121,6 +123,27 @@ export async function getOrderEvents(orderId: string): Promise<CoreOrderEventRow
       `/orders/${encodeURIComponent(orderId)}/events`,
     );
     return response.data.data ?? [];
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function reconcileExecutionOrder(orderId: string): Promise<Record<string, unknown>> {
+  try {
+    const response = await httpClient.post<Record<string, unknown>>(`/execution/reconcile/${encodeURIComponent(orderId)}`);
+    return response.data;
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function cancelExecutionOrder(orderId: string, reason = "manual_cancel_from_auto_trading_real"): Promise<Record<string, unknown>> {
+  try {
+    const response = await httpClient.post<Record<string, unknown>>("/execution/cancel", {
+      order_id: orderId,
+      reason,
+    });
+    return response.data;
   } catch (error) {
     throw normalizeError(error);
   }
