@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Image from "next/image";
 import {
   Bar,
   BarChart,
@@ -41,22 +42,20 @@ import {
   fetchShortTermLiquidityEligibleCache,
   fetchMailSignalEntryRunsRecent,
   fetchMailSignalsLatest,
+  postMailSignalsRunOnce,
+  postShortTermPostCloseRefreshRunOnce,
   postRealRecommendationActionBuy,
   postRealRecommendationsScan,
   fetchSchedulerDemoSession,
-  fetchShortTermAsyncJob,
   parseShortTermRunExchangeScope,
   fetchSchedulerStatus,
   fetchShortTermRuns,
-  postShortTermRunCycle,
-  postMailSignalEntryRunOnce,
   setSchedulerDemoSession,
   SHORT_TERM_RUN_LOG_SCOPE_ORDER,
   shortTermRunLogScopeBucket,
   toggleScheduler,
   toggleRealScanOnlyScheduler,
   type ShortTermAutomationRunRow,
-  type ShortTermAsyncJobStatus,
   type ShortTermExchangeScope,
   type MailSignalsData,
   type MailSignalEntryRunData,
@@ -169,47 +168,6 @@ function formatDateTime(iso: string): string {
   return d.toLocaleString("vi-VN", { hour12: false });
 }
 
-function getVnHourMinute(now: Date): { hour: number; minute: number } {
-  const formatter = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Asia/Ho_Chi_Minh",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
-  const parts = formatter.formatToParts(now);
-  const hourText = parts.find((part) => part.type === "hour")?.value ?? "0";
-  const minuteText = parts.find((part) => part.type === "minute")?.value ?? "0";
-  return {
-    hour: Number.parseInt(hourText, 10),
-    minute: Number.parseInt(minuteText, 10),
-  };
-}
-
-function isInVnTradingSession(now: Date): boolean {
-  const dayFormatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: "Asia/Ho_Chi_Minh",
-    weekday: "short",
-  });
-  const weekday = dayFormatter.format(now);
-  if (weekday === "Sat" || weekday === "Sun") {
-    return false;
-  }
-  const { hour, minute } = getVnHourMinute(now);
-  const totalMinutes = hour * 60 + minute;
-  const morningStart = 9 * 60;
-  const morningEnd = 11 * 60 + 30;
-  const afternoonStart = 13 * 60;
-  const afternoonEnd = 14 * 60 + 45;
-  const inMorning = totalMinutes >= morningStart && totalMinutes <= morningEnd;
-  const inAfternoon = totalMinutes >= afternoonStart && totalMinutes <= afternoonEnd;
-  return inMorning || inAfternoon;
-}
-
-function asFiniteNumber(value: unknown): number | null {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
-}
-
 const DEMO_SESSION_STORAGE_KEY = "auto_trading_demo_session_id";
 
 function getStoredDemoSessionId(): string {
@@ -218,36 +176,6 @@ function getStoredDemoSessionId(): string {
   }
   const existing = window.localStorage.getItem(DEMO_SESSION_STORAGE_KEY);
   return existing?.trim() ?? "";
-}
-
-function asyncJobStatusClass(status: string): string {
-  const normalized = status.toUpperCase();
-  if (normalized === "FINISHED") return "text-emerald-300";
-  if (normalized === "FAILED") return "text-rose-300";
-  if (normalized === "RUNNING") return "text-amber-200";
-  return "text-slate-300";
-}
-
-function formatElapsedSeconds(startedAt: string, finishedAt?: string | null): string {
-  const startMs = new Date(startedAt).getTime();
-  if (!Number.isFinite(startMs)) {
-    return "-";
-  }
-  const endMs = finishedAt ? new Date(finishedAt).getTime() : Date.now();
-  if (!Number.isFinite(endMs) || endMs < startMs) {
-    return "-";
-  }
-  const totalSeconds = Math.max(0, Math.floor((endMs - startMs) / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  if (hours > 0) {
-    return `${hours}h ${minutes}m ${seconds}s`;
-  }
-  if (minutes > 0) {
-    return `${minutes}m ${seconds}s`;
-  }
-  return `${seconds}s`;
 }
 
 function parseNumberCandidate(value: unknown): number | null {
@@ -291,20 +219,6 @@ function extractDnseTradableCashFromRows(rows: Record<string, unknown>[]): numbe
   ];
   for (const row of rows) {
     for (const key of tradableKeys) {
-      const n = parseNumberCandidate(row[key]);
-      if (n != null && n >= 0) {
-        return n;
-      }
-    }
-  }
-  return null;
-}
-
-function extractRealSchedulerCashFromRows(rows: Record<string, unknown>[]): number | null {
-  // Production rule: REAL auto scheduler uses broker-reported available cash first, then purchasing power.
-  const preferredKeys = ["availableCash", "purchasingPower"];
-  for (const row of rows) {
-    for (const key of preferredKeys) {
       const n = parseNumberCandidate(row[key]);
       if (n != null && n >= 0) {
         return n;
@@ -416,18 +330,14 @@ export function AutoTradingClient() {
   const [automationRunsError, setAutomationRunsError] = useState("");
   const [mailSignals, setMailSignals] = useState<MailSignalsData | null>(null);
   const [mailSignalsError, setMailSignalsError] = useState("");
+  const [mailSignalsRunOnceBusy, setMailSignalsRunOnceBusy] = useState(false);
   const [mailSignalEntryRuns, setMailSignalEntryRuns] = useState<MailSignalEntryRunData[]>([]);
   const [mailSignalEntryRunError, setMailSignalEntryRunError] = useState("");
   const [liquidityEligibleRows, setLiquidityEligibleRows] = useState<LiquidityEligibleCacheRow[]>([]);
   const [liquidityEligibleError, setLiquidityEligibleError] = useState("");
   const [liquidityEligibleTotal, setLiquidityEligibleTotal] = useState(0);
+  const [liquidityRefreshBusy, setLiquidityRefreshBusy] = useState(false);
   const [automationLogScopeFilter, setAutomationLogScopeFilter] = useState<"ANY" | ShortTermExchangeScope>("ANY");
-  const [manualCycleExchangeScope, setManualCycleExchangeScope] = useState<ShortTermExchangeScope>("ALL");
-  const [manualCycleBusy, setManualCycleBusy] = useState(false);
-  const [manualCycleError, setManualCycleError] = useState("");
-  const [manualCycleAsyncJobId, setManualCycleAsyncJobId] = useState<string | null>(null);
-  const [manualCycleAsyncStatus, setManualCycleAsyncStatus] = useState<ShortTermAsyncJobStatus | null>(null);
-  const [manualCycleAsyncNotified, setManualCycleAsyncNotified] = useState(false);
   const [realRecommendations, setRealRecommendations] = useState<RealRecommendationRow[]>([]);
   const [realRecommendationsGeneratedAt, setRealRecommendationsGeneratedAt] = useState<string | null>(null);
   const [realRecommendationsBusy, setRealRecommendationsBusy] = useState(false);
@@ -466,15 +376,15 @@ export function AutoTradingClient() {
   const [demoSessions, setDemoSessions] = useState<Array<{ session_id: string; created_at: string }>>([]);
   const [demoSessionsLoading, setDemoSessionsLoading] = useState(false);
   const [demoCash, setDemoCash] = useState(DEMO_INITIAL_CASH_VND);
-  const [demoPositions, setDemoPositions] = useState<DemoPosition[]>([]);
-  const [demoUnrealizedPnl, setDemoUnrealizedPnl] = useState(0);
+  const [, setDemoPositions] = useState<DemoPosition[]>([]);
+  const [, setDemoUnrealizedPnl] = useState(0);
   const [demoOrders, setDemoOrders] = useState<DemoOrderItem[]>([]);
   const [historyOffset, setHistoryOffset] = useState(0);
   const [historyLimit] = useState(30);
   const [historyTotal, setHistoryTotal] = useState(0);
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
   const [demoSessionBusy, setDemoSessionBusy] = useState(false);
-  const [demoLog, setDemoLog] = useState<string[]>([]);
+  const [, setDemoLog] = useState<string[]>([]);
   const [demoOverview, setDemoOverview] = useState<DemoSessionOverviewData | null>(null);
   const [demoOverviewError, setDemoOverviewError] = useState("");
   const [strategyCashTransferTarget, setStrategyCashTransferTarget] = useState<"SHORT_TERM" | "MAIL_SIGNAL" | "UNALLOCATED">(
@@ -540,99 +450,6 @@ export function AutoTradingClient() {
       },
     ].filter((block) => block.sessionId && block.groups.length > 0);
   }, [automationLogScopeFilter, automationRuns, demoSessionId, schedulerAccountMode]);
-
-  const scannerHealth = useMemo(() => {
-    const scopedRuns = automationRuns
-      .filter((run) => {
-        const mode = String((run.detail?.account_mode as string | undefined) || "").trim().toUpperCase();
-        return mode === schedulerAccountMode;
-      })
-      .filter((run) => {
-        if (schedulerAccountMode !== "DEMO") {
-          return true;
-        }
-        const sid = String((run.detail?.demo_session_id as string | undefined) || "").trim();
-        return sid.length > 0 && sid === demoSessionId;
-      })
-      .slice(0, 10);
-    if (scopedRuns.length === 0) {
-      return null;
-    }
-    let totalScanned = 0;
-    let totalBuy = 0;
-    let totalExec = 0;
-    let totalErrors = 0;
-    let totalEntryGateSkip = 0;
-    let totalCooldownSkip = 0;
-    let totalDynamicFloorSkip = 0;
-    let totalThresholdSourceClaude = 0;
-    let totalThresholdSourceHeuristic = 0;
-    let totalPlannedSpent = 0;
-    let totalActualSpent = 0;
-    let dynamicFloorSum = 0;
-    let dynamicFloorCount = 0;
-    for (const run of scopedRuns) {
-      totalScanned += Number(run.scanned || 0);
-      totalBuy += Number(run.buy_candidates || 0);
-      totalExec += Number(run.executed || 0);
-      totalErrors += Number(run.errors || 0);
-      const detail = run.detail ?? {};
-      const entryGate = asFiniteNumber(detail.skipped_entry_gate);
-      const cooldown = asFiniteNumber(detail.skipped_experience_cooldown);
-      const dynSkip = asFiniteNumber(detail.skipped_dynamic_buy_floor);
-      const dynFloor = asFiniteNumber(detail.dynamic_buy_composite_floor);
-      const sourceClaude = asFiniteNumber(detail.experience_threshold_source_claude);
-      const sourceHeuristic = asFiniteNumber(detail.experience_threshold_source_heuristic);
-      const decisionMeta = (detail.buy_decision_meta ?? {}) as Record<string, unknown>;
-      const plannedSpent = asFiniteNumber(decisionMeta.planned_spent);
-      const actualSpent = asFiniteNumber(decisionMeta.actual_spent);
-      totalEntryGateSkip += entryGate ?? 0;
-      totalCooldownSkip += cooldown ?? 0;
-      totalDynamicFloorSkip += dynSkip ?? 0;
-      totalThresholdSourceClaude += sourceClaude ?? 0;
-      totalThresholdSourceHeuristic += sourceHeuristic ?? 0;
-      totalPlannedSpent += plannedSpent ?? 0;
-      totalActualSpent += actualSpent ?? 0;
-      if (dynFloor != null) {
-        dynamicFloorSum += dynFloor;
-        dynamicFloorCount += 1;
-      }
-    }
-    const n = scopedRuns.length;
-    return {
-      sampleSize: n,
-      avgScanned: totalScanned / n,
-      avgBuy: totalBuy / n,
-      avgExecuted: totalExec / n,
-      avgErrors: totalErrors / n,
-      totalEntryGateSkip,
-      totalCooldownSkip,
-      totalDynamicFloorSkip,
-      totalThresholdSourceClaude,
-      totalThresholdSourceHeuristic,
-      totalPlannedSpent,
-      totalActualSpent,
-      avgDynamicFloor: dynamicFloorCount > 0 ? dynamicFloorSum / dynamicFloorCount : null,
-    };
-  }, [automationRuns, demoSessionId, schedulerAccountMode]);
-
-  const scannerHealthFlags = useMemo(() => {
-    if (!scannerHealth) {
-      return null;
-    }
-    const isErrHigh = scannerHealth.avgErrors > 0.5;
-    const isCooldownSpike = scannerHealth.totalCooldownSkip >= 5;
-    const isEntryGateTooTight = scannerHealth.totalEntryGateSkip >= 20;
-    const isDynamicFloorHigh = (scannerHealth.avgDynamicFloor ?? 0) >= 62;
-    const hasWarning = isErrHigh || isCooldownSpike || isEntryGateTooTight || isDynamicFloorHigh;
-    return {
-      hasWarning,
-      isErrHigh,
-      isCooldownSpike,
-      isEntryGateTooTight,
-      isDynamicFloorHigh,
-    };
-  }, [scannerHealth]);
 
   const realShortTermRuns = useMemo(() => {
     const rows = automationRuns
@@ -743,27 +560,27 @@ export function AutoTradingClient() {
         setDemoPositions(account.positions);
         setDemoUnrealizedPnl(account.unrealized_pnl);
         setHistoryTotal(account.trade_history_total);
+        const mappedFromDemoTrades: DemoOrderItem[] = account.trade_history.map((item) => ({
+          id: item.trade_id,
+          createdAt: item.created_at,
+          symbol: item.symbol,
+          side: item.side === "BUY" ? "buy" : "sell",
+          quantity: item.quantity,
+          price: item.price,
+          notional: item.notional,
+        }));
         setDemoOrders((prev) => {
-          const mapped: DemoOrderItem[] = account.trade_history.map((item) => ({
-            id: item.trade_id,
-            createdAt: item.created_at,
-            symbol: item.symbol,
-            side: item.side === "BUY" ? "buy" : "sell",
-            quantity: item.quantity,
-            price: item.price,
-            notional: item.notional,
-          }));
           if (options?.append) {
             const existingIds = new Set(prev.map((item) => item.id));
             const merged = [...prev];
-            for (const row of mapped) {
+            for (const row of mappedFromDemoTrades) {
               if (!existingIds.has(row.id)) {
                 merged.push(row);
               }
             }
             return merged;
           }
-          return mapped;
+          return mappedFromDemoTrades;
         });
       } catch (error) {
         const message = isAppError(error) ? error.message : "Khong tai duoc demo account.";
@@ -1285,7 +1102,7 @@ export function AutoTradingClient() {
     showToast(TOAST_MESSAGES.dnseSessionCleared, "success");
   };
 
-  const handleProbeAccount = async () => {
+  const handleProbeAccount = useCallback(async () => {
     setAccountProbeBusy(true);
     setAccountProbeMessage("");
     try {
@@ -1323,7 +1140,7 @@ export function AutoTradingClient() {
     } finally {
       setAccountProbeBusy(false);
     }
-  };
+  }, [credsPayload]);
 
   useEffect(() => {
     if (accountTab !== "real") {
@@ -1424,7 +1241,7 @@ export function AutoTradingClient() {
     }
   };
 
-  const handleToggleScheduler = async () => {
+  const handleToggleScheduler = useCallback(async () => {
     if (!schedulerStatus) {
       return;
     }
@@ -1439,7 +1256,7 @@ export function AutoTradingClient() {
     } finally {
       setSchedulerBusy(false);
     }
-  };
+  }, [loadAutomationRuns, schedulerAccountMode, schedulerStatus]);
 
   // Keep backend scheduler aligned with REAL mode selection.
   // - SCAN_ONLY: production scheduler must be disabled; scan-only scheduler follows master toggle.
@@ -1520,100 +1337,43 @@ export function AutoTradingClient() {
     handleToggleScheduler,
   ]);
 
-  const handleManualShortTermCycle = async () => {
-    setManualCycleBusy(true);
-    setManualCycleError("");
+  const handleRunMailSignalsNow = async () => {
+    if (mailSignalsRunOnceBusy) {
+      return;
+    }
+    setMailSignalsRunOnceBusy(true);
     try {
-      if (schedulerAccountMode === "REAL") {
-        await postRealRecommendationsScan({
-          exchange_scope: manualCycleExchangeScope,
-        });
-        setManualCycleAsyncJobId(null);
-        setManualCycleAsyncStatus(null);
-        setManualCycleAsyncNotified(false);
-        await Promise.all([loadRealRecommendations(), loadAutomationRuns()]);
-        showToast("REAL manual cycle da chuyen sang scan-only recommendations.", "success");
-        return;
-      }
-      const response = await postShortTermRunCycle({
-        exchange_scope: manualCycleExchangeScope,
-        account_mode: schedulerAccountMode,
-        async_for_heavy: true,
-        demo_session_id: schedulerAccountMode === "DEMO" ? demoSessionId : undefined,
-      });
-      if ((response.run_status || "").toUpperCase() === "ACCEPTED" && response.run_id) {
-        setManualCycleAsyncJobId(response.run_id);
-        setManualCycleAsyncNotified(false);
-        setManualCycleAsyncStatus({
-          job_id: response.run_id,
-          status: "QUEUED",
-          started_at: new Date().toISOString(),
-          finished_at: null,
-          result: null,
-          error: null,
-          exchange_scope: String(response.detail?.exchange_scope ?? manualCycleExchangeScope),
-          account_mode: schedulerAccountMode,
-          limit_symbols: Number(response.detail?.limit_symbols ?? 0),
-        });
-      } else {
-        setManualCycleAsyncJobId(null);
-        setManualCycleAsyncStatus(null);
-        setManualCycleAsyncNotified(false);
-      }
-      await loadAutomationRuns();
+      const row = await postMailSignalsRunOnce();
+      setMailSignals(row);
+      setMailSignalsError("");
+      showToast("Da chay mail signals manual thanh cong.", "success");
     } catch (error) {
-      setManualCycleError(isAppError(error) ? error.message : "Short-term run cycle that bai.");
+      const message = isAppError(error) ? error.message : "Chay mail signals manual that bai.";
+      setMailSignalsError(message);
+      showToast(message, "error");
     } finally {
-      setManualCycleBusy(false);
+      setMailSignalsRunOnceBusy(false);
     }
   };
 
-  useEffect(() => {
-    if (!manualCycleAsyncJobId) {
+  const handleRunPostCloseRefreshNow = async () => {
+    if (liquidityRefreshBusy) {
       return;
     }
-    let cancelled = false;
-    const tick = async () => {
-      try {
-        const row = await fetchShortTermAsyncJob(manualCycleAsyncJobId);
-        if (cancelled) {
-          return;
-        }
-        setManualCycleAsyncStatus(row);
-        if (row.status === "FINISHED" || row.status === "FAILED") {
-          if (!manualCycleAsyncNotified) {
-            if (row.status === "FINISHED") {
-              showToast(`Short-term async cycle hoàn tất: ${row.job_id}`, "success");
-            } else {
-              showToast(
-                row.error
-                  ? `Short-term async cycle thất bại: ${row.error}`
-                  : `Short-term async cycle thất bại: ${row.job_id}`,
-                "error",
-              );
-            }
-            setManualCycleAsyncNotified(true);
-          }
-          await loadAutomationRuns();
-          setManualCycleAsyncJobId(null);
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setManualCycleError(isAppError(error) ? error.message : "Khong tai duoc trang thai async cycle.");
-          setManualCycleAsyncJobId(null);
-        }
-      }
-    };
-
-    void tick();
-    const id = window.setInterval(() => {
-      void tick();
-    }, 5000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
-  }, [loadAutomationRuns, manualCycleAsyncJobId, manualCycleAsyncNotified, showToast]);
+    setLiquidityRefreshBusy(true);
+    try {
+      await postShortTermPostCloseRefreshRunOnce();
+      await loadLiquidityEligibleRows();
+      setLiquidityEligibleError("");
+      showToast("Da chay post-close refresh thanh cong.", "success");
+    } catch (error) {
+      const message = isAppError(error) ? error.message : "Chay post-close refresh that bai.";
+      setLiquidityEligibleError(message);
+      showToast(message, "error");
+    } finally {
+      setLiquidityRefreshBusy(false);
+    }
+  };
 
   useEffect(() => {
     const holdings = demoOverview?.holdings ?? [];
@@ -1821,9 +1581,11 @@ export function AutoTradingClient() {
                   <p className="text-xs font-semibold text-cyan-100">QR nap tien DNSE</p>
                   {DNSE_DEPOSIT_QR_URL ? (
                     <div className="mt-2 flex justify-center">
-                      <img
+                      <Image
                         src={DNSE_DEPOSIT_QR_URL}
                         alt="DNSE deposit QR"
+                        width={160}
+                        height={160}
                         className="h-40 w-40 rounded-md border border-white/10 bg-white p-1 object-contain"
                       />
                     </div>
@@ -2060,7 +1822,7 @@ export function AutoTradingClient() {
           </section>
 
           <section className="glass-panel rounded-2xl p-6">
-            <div className="flex flex-wrap items-end justify-between gap-3">
+            <div className="sticky top-0 z-10 -mx-1 mb-2 flex flex-wrap items-end justify-between gap-3 border-b border-white/10 bg-[#0b1220]/95 px-1 pb-2 backdrop-blur">
               <div>
                 <h3 className="text-sm font-semibold text-slate-200">REAL Recommendations (scan-only)</h3>
                 <p className="mt-1 text-xs text-slate-500">
@@ -2128,9 +1890,19 @@ export function AutoTradingClient() {
           </section>
 
           <section className="glass-panel rounded-2xl p-6">
-            <h3 className="text-sm font-semibold text-slate-200">
-              Liquidity Cache Picks (eligible_spike=true + eligible_liquidity=true)
-            </h3>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold text-slate-200">
+                Liquidity Cache Picks (eligible_spike=true + eligible_liquidity=true)
+              </h3>
+              <button
+                type="button"
+                onClick={() => void handleRunPostCloseRefreshNow()}
+                disabled={liquidityRefreshBusy}
+                className="rounded-md border border-cyan-300/40 px-3 py-1.5 text-[11px] font-semibold text-cyan-100 disabled:opacity-50"
+              >
+                {liquidityRefreshBusy ? "Running..." : "Run now"}
+              </button>
+            </div>
             {liquidityEligibleError ? <p className="mt-2 text-xs text-rose-300">{liquidityEligibleError}</p> : null}
             {liquidityEligibleRows.length === 0 ? (
               <p className="mt-3 text-xs text-slate-500">Chua co ma dat du ca 2 dieu kien trong Redis cache.</p>
@@ -2168,7 +1940,17 @@ export function AutoTradingClient() {
           </section>
 
           <section className="glass-panel rounded-2xl p-6">
-            <h3 className="text-sm font-semibold text-slate-200">Mail Signals</h3>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold text-slate-200">Mail Signals</h3>
+              <button
+                type="button"
+                onClick={() => void handleRunMailSignalsNow()}
+                disabled={mailSignalsRunOnceBusy}
+                className="rounded-md border border-cyan-300/40 px-3 py-1.5 text-[11px] font-semibold text-cyan-100 disabled:opacity-50"
+              >
+                {mailSignalsRunOnceBusy ? "Running..." : "Run now"}
+              </button>
+            </div>
             {mailSignalsError ? <p className="mt-2 text-xs text-rose-300">{mailSignalsError}</p> : null}
             {!mailSignals ? (
               <p className="mt-3 text-xs text-slate-500">Chua co du lieu mail signal.</p>
@@ -2448,7 +2230,12 @@ export function AutoTradingClient() {
                     <tr>
                       <th className="py-2.5 pr-4 whitespace-nowrap">Symbol</th>
                       <th className="py-2.5 pr-4 whitespace-nowrap">So luong</th>
+                      <th className="py-2.5 pr-4 whitespace-nowrap">Duoc ban (T+2)</th>
+                      <th className="py-2.5 pr-4 whitespace-nowrap">Cho T+2</th>
+                      <th className="py-2.5 pr-4 whitespace-nowrap">Ngay duoc ban gan nhat</th>
                       <th className="py-2.5 pr-4 whitespace-nowrap">Gia mua</th>
+                      <th className="py-2.5 pr-4 whitespace-nowrap">TP</th>
+                      <th className="py-2.5 pr-4 whitespace-nowrap">SL</th>
                       <th className="py-2.5 pr-4 whitespace-nowrap">Gia hien tai</th>
                       <th className="py-2.5 whitespace-nowrap">% Lai/Lo</th>
                     </tr>
@@ -2457,6 +2244,8 @@ export function AutoTradingClient() {
                     {demoOverview.holdings.map((holding) => {
                       const symbol = String(holding.symbol || "").toUpperCase();
                       const avg = normalizeVnStockPrice(Number(holding.average_buy_price || 0));
+                      const tp = normalizeVnStockPrice(Number(holding.take_profit_price ?? 0));
+                      const sl = normalizeVnStockPrice(Number(holding.stoploss_price ?? 0));
                       const last = normalizeVnStockPrice(Number(holdingLastPriceBySymbol[symbol] ?? 0));
                       const hasMark = Number.isFinite(last) && last > 0;
                       const pnlPct = hasMark && avg > 0 ? (last / avg - 1) * 100 : null;
@@ -2466,7 +2255,14 @@ export function AutoTradingClient() {
                         <tr key={`${holding.symbol}-${holding.opened_at}`} className="border-b border-white/5">
                           <td className="py-2 pr-3 font-mono text-cyan-200">{symbol}</td>
                           <td className="py-2 pr-3">{Number(holding.quantity || 0)}</td>
+                          <td className="py-2 pr-3 text-emerald-300">{Number(holding.settled_quantity || 0)}</td>
+                          <td className="py-2 pr-3 text-amber-300">{Number(holding.pending_settlement_quantity || 0)}</td>
+                          <td className="py-2 pr-3">
+                            {holding.next_settle_date ? formatDateTime(String(holding.next_settle_date)) : "-"}
+                          </td>
                           <td className="py-2 pr-3">{formatPrice(avg)}</td>
+                          <td className="py-2 pr-3">{tp > 0 ? formatPrice(tp) : "-"}</td>
+                          <td className="py-2 pr-3">{sl > 0 ? formatPrice(sl) : "-"}</td>
                           <td className="py-2 pr-3">{hasMark ? formatPrice(last) : "-"}</td>
                           <td className={`py-2 ${pnlClass}`}>{pnlPct == null ? "-" : `${pnlPct > 0 ? "+" : ""}${pnlPct.toFixed(2)}%`}</td>
                         </tr>
@@ -2571,9 +2367,19 @@ export function AutoTradingClient() {
 
           {schedulerError ? <p className="text-xs text-rose-300">{schedulerError}</p> : null}
           <section className="glass-panel rounded-2xl p-6">
-            <h3 className="text-sm font-semibold text-slate-200">
-              Liquidity Cache Picks (eligible_spike=true + eligible_liquidity=true)
-            </h3>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold text-slate-200">
+                Liquidity Cache Picks (eligible_spike=true + eligible_liquidity=true)
+              </h3>
+              <button
+                type="button"
+                onClick={() => void handleRunPostCloseRefreshNow()}
+                disabled={liquidityRefreshBusy}
+                className="rounded-md border border-cyan-300/40 px-3 py-1.5 text-[11px] font-semibold text-cyan-100 disabled:opacity-50"
+              >
+                {liquidityRefreshBusy ? "Running..." : "Run now"}
+              </button>
+            </div>
             {liquidityEligibleError ? <p className="mt-2 text-xs text-rose-300">{liquidityEligibleError}</p> : null}
             {liquidityEligibleRows.length === 0 ? (
               <p className="mt-3 text-xs text-slate-500">Chua co ma dat du ca 2 dieu kien trong Redis cache.</p>
@@ -2609,191 +2415,18 @@ export function AutoTradingClient() {
               </div>
             )}
           </section>
-          <div className="rounded-md border border-white/10 bg-black/20 p-3 text-xs text-slate-300">
-            {scannerHealth ? (
-              <div
-                className={`mb-3 grid gap-2 rounded-md p-3 text-[11px] text-slate-300 md:grid-cols-4 ${
-                  scannerHealthFlags?.hasWarning
-                    ? "border border-rose-300/30 bg-rose-300/10"
-                    : "border border-cyan-300/20 bg-cyan-300/5"
-                }`}
-              >
-                <p className={`font-semibold ${scannerHealthFlags?.hasWarning ? "text-rose-200" : "text-cyan-200"}`}>
-                  Scanner Health (last {scannerHealth.sampleSize} runs)
-                </p>
-                <p>
-                  avg scan: <span className="text-violet-300">{scannerHealth.avgScanned.toFixed(1)}</span> | avg buy:{" "}
-                  <span className="text-amber-300">{scannerHealth.avgBuy.toFixed(1)}</span>
-                </p>
-                <p>
-                  avg exec: <span className="text-emerald-300">{scannerHealth.avgExecuted.toFixed(1)}</span> | avg err:{" "}
-                  <span className={scannerHealthFlags?.isErrHigh ? "text-rose-300" : "text-slate-300"}>
-                    {scannerHealth.avgErrors.toFixed(2)}
-                  </span>
-                </p>
-                <p>
-                  entry_gate_skip:{" "}
-                  <span className={scannerHealthFlags?.isEntryGateTooTight ? "text-rose-300" : "text-slate-300"}>
-                    {scannerHealth.totalEntryGateSkip}
-                  </span>{" "}
-                  | cooldown_skip:{" "}
-                  <span className={scannerHealthFlags?.isCooldownSpike ? "text-rose-300" : "text-slate-300"}>
-                    {scannerHealth.totalCooldownSkip}
-                  </span>{" "}
-                  | dynamic_floor_skip: {scannerHealth.totalDynamicFloorSkip} | dynamic_floor:{" "}
-                  <span className={scannerHealthFlags?.isDynamicFloorHigh ? "text-rose-300" : "text-slate-300"}>
-                    {scannerHealth.avgDynamicFloor != null ? scannerHealth.avgDynamicFloor.toFixed(1) : "-"}
-                  </span>
-                </p>
-                <p>
-                  threshold_source: claude{" "}
-                  <span className="text-cyan-200">{scannerHealth.totalThresholdSourceClaude}</span> | heuristic{" "}
-                  <span className="text-slate-300">{scannerHealth.totalThresholdSourceHeuristic}</span>
-                </p>
-                <p>
-                  spend plan/actual:{" "}
-                  <span className="text-violet-300">{scannerHealth.totalPlannedSpent.toLocaleString("vi-VN")}</span> /{" "}
-                  <span className="text-emerald-300">{scannerHealth.totalActualSpent.toLocaleString("vi-VN")}</span> | gap{" "}
-                  <span className="text-amber-300">
-                    {(scannerHealth.totalPlannedSpent - scannerHealth.totalActualSpent).toLocaleString("vi-VN")}
-                  </span>
-                </p>
-                {scannerHealthFlags?.hasWarning ? (
-                  <p className="md:col-span-4 text-rose-200">
-                    Warning: scanner quality guard is tight. Check latest runs for error spike, cooldown spike, or overly strict filters.
-                  </p>
-                ) : null}
-              </div>
-            ) : null}
-            <div className="flex flex-wrap items-end justify-between gap-3">
-              <p className="font-semibold text-slate-200">Auto Trading Backend Logs ({schedulerAccountMode})</p>
-              <div className="flex flex-wrap items-center gap-2">
-                <label className="flex flex-col gap-1 text-[11px] text-slate-400" htmlFor="at-log-scope-filter">
-                  Log scope
-                  <select
-                    id="at-log-scope-filter"
-                    className="rounded-md border border-white/15 bg-black/30 px-2 py-1.5 font-mono text-xs text-slate-100"
-                    value={automationLogScopeFilter}
-                    onChange={(e) => setAutomationLogScopeFilter(e.target.value as "ANY" | ShortTermExchangeScope)}
-                  >
-                    <option value="ANY">ANY</option>
-                    <option value="ALL">ALL</option>
-                    <option value="HOSE">HOSE</option>
-                    <option value="HNX">HNX</option>
-                    <option value="UPCOM">UPCOM</option>
-                  </select>
-                </label>
-                <label className="flex flex-col gap-1 text-[11px] text-slate-400" htmlFor="at-manual-exchange-scope">
-                  Exchange scope
-                  <select
-                    id="at-manual-exchange-scope"
-                    className="rounded-md border border-white/15 bg-black/30 px-2 py-1.5 font-mono text-xs text-slate-100"
-                    value={manualCycleExchangeScope}
-                    onChange={(e) => setManualCycleExchangeScope(e.target.value as ShortTermExchangeScope)}
-                    disabled={manualCycleBusy}
-                  >
-                    <option value="ALL">ALL</option>
-                    <option value="HOSE">HOSE</option>
-                    <option value="HNX">HNX</option>
-                    <option value="UPCOM">UPCOM</option>
-                  </select>
-                </label>
-                <button
-                  type="button"
-                  onClick={() => void handleManualShortTermCycle()}
-                  disabled={manualCycleBusy}
-                  className="rounded-md border border-cyan-300/40 px-3 py-2 text-xs font-semibold text-cyan-100 disabled:opacity-50"
-                >
-                  {manualCycleBusy ? "Dang chay cycle..." : "Run short-term cycle"}
-                </button>
-              </div>
-            </div>
-            {manualCycleError ? <p className="mt-2 text-rose-300">{manualCycleError}</p> : null}
-            {manualCycleAsyncStatus ? (
-              <p className={`mt-2 ${asyncJobStatusClass(manualCycleAsyncStatus.status)}`}>
-                Async cycle {manualCycleAsyncStatus.job_id}: {manualCycleAsyncStatus.status}
-                {" | elapsed "}
-                {formatElapsedSeconds(manualCycleAsyncStatus.started_at, manualCycleAsyncStatus.finished_at)}
-                {manualCycleAsyncStatus.error ? ` | ${manualCycleAsyncStatus.error}` : ""}
-              </p>
-            ) : null}
-            {automationRunsError ? <p className="mt-2 text-rose-300">{automationRunsError}</p> : null}
-            {automationRuns.length === 0 ? (
-              <p className="mt-2 text-slate-500">Chua co run log.</p>
-            ) : (
-              <div className="mt-2 space-y-3">
-                {automationRunLogGroups.map((sessionBlock, sessionIdx) => (
-                  <div key={sessionBlock.sessionId ?? "ACCOUNT_MODE_SCOPE"}>
-                    {sessionBlock.sessionId ? (
-                      <p
-                        className={`text-[11px] font-semibold uppercase tracking-wide text-cyan-300 ${
-                          sessionIdx > 0 ? "border-t border-white/10 pt-3" : ""
-                        }`}
-                      >
-                        DEMO_SESSION_ID: {sessionBlock.sessionId}
-                      </p>
-                    ) : null}
-                    <div className="mt-1 space-y-3">
-                      {sessionBlock.groups.map((group, idx) => (
-                        <div key={`${sessionBlock.sessionId ?? "ACCOUNT_MODE_SCOPE"}-${group.bucket}`}>
-                          <p
-                            className={`text-[11px] font-semibold uppercase tracking-wide text-slate-500 ${
-                              idx > 0 ? "border-t border-white/10 pt-2" : ""
-                            }`}
-                          >
-                            {group.bucket === "OTHER" ? "Other / legacy" : group.bucket} · {group.runs.length} run
-                            {group.runs.length === 1 ? "" : "s"}
-                          </p>
-                          <div className="mt-1 space-y-1">
-                            {group.runs.map((run) => (
-                              <div key={run.id} className="font-mono">
-                                <p>
-                                  <span className="text-cyan-200">{formatDateTime(run.started_at)}</span> |{" "}
-                                  <span className={automationRunStatusClass(run.run_status)}>{run.run_status}</span> | scan{" "}
-                                  <span className="text-violet-300">{run.scanned}</span> | buy{" "}
-                                  <span className="text-amber-300">{run.buy_candidates}</span> | exec{" "}
-                                  <span className="text-emerald-300">{run.executed}</span> | err{" "}
-                                  <span className={run.errors > 0 ? "text-rose-300" : "text-slate-400"}>{run.errors}</span>
-                                </p>
-                                <p className="text-[11px] text-slate-500">
-                                  {(() => {
-                                    const detail = run.detail ?? {};
-                                    const skippedEntryGate = asFiniteNumber(detail.skipped_entry_gate);
-                                    const skippedCooldown = asFiniteNumber(detail.skipped_experience_cooldown);
-                                    const skippedDynamicFloor = asFiniteNumber(detail.skipped_dynamic_buy_floor);
-                                    const dynamicFloor = asFiniteNumber(detail.dynamic_buy_composite_floor);
-                                    const thresholdSourceClaude = asFiniteNumber(detail.experience_threshold_source_claude);
-                                    const thresholdSourceHeuristic = asFiniteNumber(detail.experience_threshold_source_heuristic);
-                                    const decisionMeta = (detail.buy_decision_meta ?? {}) as Record<string, unknown>;
-                                    const decisionSource = typeof decisionMeta.source === "string" ? decisionMeta.source : "-";
-                                    const plannedSpent = asFiniteNumber(decisionMeta.planned_spent);
-                                    const actualSpent = asFiniteNumber(decisionMeta.actual_spent);
-                                    const executionGap = asFiniteNumber(decisionMeta.execution_spent_gap);
-                                    return [
-                                      `entry_gate_skip=${skippedEntryGate ?? 0}`,
-                                      `cooldown_skip=${skippedCooldown ?? 0}`,
-                                      `dynamic_floor_skip=${skippedDynamicFloor ?? 0}`,
-                                      `dynamic_floor=${dynamicFloor != null ? dynamicFloor.toFixed(1) : "-"}`,
-                                      `threshold_source=claude:${thresholdSourceClaude ?? 0}/heuristic:${thresholdSourceHeuristic ?? 0}`,
-                                      `spent(plan/actual/gap)=${plannedSpent ?? 0}/${actualSpent ?? 0}/${executionGap ?? 0}`,
-                                      `decision=${decisionSource}`,
-                                    ].join(" | ");
-                                  })()}
-                                </p>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
           <section className="glass-panel rounded-2xl p-6">
-            <h3 className="text-sm font-semibold text-slate-200">Mail Signals</h3>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold text-slate-200">Mail Signals</h3>
+              <button
+                type="button"
+                onClick={() => void handleRunMailSignalsNow()}
+                disabled={mailSignalsRunOnceBusy}
+                className="rounded-md border border-cyan-300/40 px-3 py-1.5 text-[11px] font-semibold text-cyan-100 disabled:opacity-50"
+              >
+                {mailSignalsRunOnceBusy ? "Running..." : "Run now"}
+              </button>
+            </div>
             {mailSignalsError ? <p className="mt-2 text-xs text-rose-300">{mailSignalsError}</p> : null}
             {!mailSignals ? (
               <p className="mt-3 text-xs text-slate-500">Chua co du lieu mail signal.</p>
@@ -2833,53 +2466,6 @@ export function AutoTradingClient() {
             )}
           </section>
 
-          <section className="glass-panel rounded-2xl p-6">
-            <h3 className="text-sm font-semibold text-slate-200">Mail Entry Scheduler Log (10 gan nhat)</h3>
-            {mailSignalEntryRunError ? <p className="mt-2 text-xs text-rose-300">{mailSignalEntryRunError}</p> : null}
-            {mailSignalEntryRuns.length === 0 ? (
-              <p className="mt-3 text-xs text-slate-500">Chua co log entry scheduler.</p>
-            ) : (
-              <div className="mt-3 space-y-4 text-xs text-slate-300">
-                {mailSignalEntryRuns.map((run, runIdx) => (
-                  <div key={`${run.redis_key}-${runIdx}`} className="rounded-md border border-white/10 bg-black/20 p-3">
-                    <p>
-                      Ran at: <span className="text-cyan-200">{formatDateTime(run.ran_at)}</span> | Scanned:{" "}
-                      <span className="text-violet-300">{run.scanned}</span> | Executed:{" "}
-                      <span className="text-emerald-300">{run.executed.length}</span> | Skipped:{" "}
-                      <span className="text-rose-300">{run.skipped.length}</span>
-                    </p>
-                    {run.executed.length === 0 ? (
-                      <p className="mt-2 text-slate-500">Khong co lenh duoc ban trong lan chay nay.</p>
-                    ) : (
-                      <div className="mt-2 overflow-x-auto">
-                        <table className="w-full min-w-[620px] text-left text-xs text-slate-200">
-                          <thead className="border-b border-white/10 uppercase text-slate-500">
-                            <tr>
-                              <th className="py-2 pr-3">Symbol</th>
-                              <th className="py-2 pr-3">Quantity</th>
-                              <th className="py-2 pr-3">Status</th>
-                              <th className="py-2 pr-3">Order ID</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {run.executed.map((row, idx) => (
-                              <tr key={`${row.symbol}-${idx}`} className="border-b border-white/5">
-                                <td className="py-2 pr-3 font-mono text-cyan-200">{row.symbol}</td>
-                                <td className="py-2 pr-3">{Number(row.quantity || 0)}</td>
-                                <td className={`py-2 pr-3 ${statusClass(String(row.status || "-"))}`}>{row.status || "-"}</td>
-                                <td className="py-2 pr-3 font-mono">{row.order_id || "-"}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
-
           <div>
             <section className="glass-panel rounded-2xl p-6">
               <h3 className="text-sm font-semibold text-slate-200">{UI_TEXT.autoTrading.demoOrdersTitle}</h3>
@@ -2912,6 +2498,75 @@ export function AutoTradingClient() {
               ) : null}
             </section>
           </div>
+          <section className="glass-panel rounded-2xl p-6">
+            <h3 className="text-sm font-semibold text-slate-200">Demo Logs</h3>
+            <p className="mt-1 text-xs text-slate-500">Log backend automation va mail entry cho demo session dang chon.</p>
+            <div className="mt-3 grid gap-4 lg:grid-cols-2">
+              <div className="rounded-md border border-white/10 bg-black/20 p-3">
+                <div className="flex flex-wrap items-end justify-between gap-2">
+                  <p className="text-xs font-semibold text-slate-300">Automation Logs (DEMO)</p>
+                  <label className="flex flex-col gap-1 text-[11px] text-slate-400" htmlFor="at-log-scope-filter">
+                    Log scope
+                    <select
+                      id="at-log-scope-filter"
+                      className="rounded-md border border-white/15 bg-black/30 px-2 py-1 font-mono text-[11px] text-slate-100"
+                      value={automationLogScopeFilter}
+                      onChange={(e) => setAutomationLogScopeFilter(e.target.value as "ANY" | ShortTermExchangeScope)}
+                    >
+                      <option value="ANY">ANY</option>
+                      <option value="ALL">ALL</option>
+                      <option value="HOSE">HOSE</option>
+                      <option value="HNX">HNX</option>
+                      <option value="UPCOM">UPCOM</option>
+                    </select>
+                  </label>
+                </div>
+                {automationRunsError ? <p className="mt-2 text-[11px] text-rose-300">{automationRunsError}</p> : null}
+                {automationRuns.length === 0 ? (
+                  <p className="mt-2 text-[11px] text-slate-500">Chua co run log.</p>
+                ) : (
+                  <div className="mt-2 max-h-72 space-y-2 overflow-y-auto text-[11px] font-mono text-slate-300">
+                    {automationRunLogGroups.map((sessionBlock, sessionIdx) => (
+                      <div key={sessionBlock.sessionId ?? "ACCOUNT_MODE_SCOPE"} className="border-b border-white/5 pb-2">
+                        {sessionBlock.sessionId ? (
+                          <p className={`text-cyan-300 ${sessionIdx > 0 ? "pt-1" : ""}`}>session={sessionBlock.sessionId}</p>
+                        ) : null}
+                        {sessionBlock.groups.map((group) =>
+                          group.runs.map((run) => (
+                            <p key={run.id} className="text-slate-300">
+                              <span className="text-cyan-200">{formatDateTime(run.started_at)}</span> |{" "}
+                              <span className={automationRunStatusClass(run.run_status)}>{run.run_status}</span> |{" "}
+                              scope={group.bucket} | scan={run.scanned} | buy={run.buy_candidates} | exec={run.executed} | err={run.errors}
+                            </p>
+                          )),
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div className="rounded-md border border-white/10 bg-black/20 p-3">
+                <p className="text-xs font-semibold text-slate-300">Mail Entry Scheduler Log (10 gan nhat)</p>
+                {mailSignalEntryRunError ? <p className="mt-2 text-[11px] text-rose-300">{mailSignalEntryRunError}</p> : null}
+                {mailSignalEntryRuns.length === 0 ? (
+                  <p className="mt-2 text-[11px] text-slate-500">Chua co log entry scheduler.</p>
+                ) : (
+                  <div className="mt-2 max-h-72 space-y-2 overflow-y-auto text-[11px] font-mono text-slate-300">
+                    {mailSignalEntryRuns.map((run, runIdx) => (
+                      <div key={`${run.redis_key}-${runIdx}`} className="border-b border-white/5 pb-2">
+                        <p>
+                          <span className="text-cyan-200">{formatDateTime(run.ran_at)}</span> | scanned={run.scanned} | executed=
+                          <span className="text-emerald-300">{run.executed.length}</span> | skipped=
+                          <span className="text-rose-300">{run.skipped.length}</span>
+                        </p>
+                        <p className="text-slate-500">source={run.source_key || "-"}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </section>
         </div>
       )}
     </div>

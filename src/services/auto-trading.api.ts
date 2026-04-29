@@ -84,6 +84,12 @@ export interface DemoHoldingOverviewItem {
   quantity: number;
   average_buy_price: number;
   position_value: number;
+  take_profit_price?: number | null;
+  stoploss_price?: number | null;
+  settled_quantity: number;
+  pending_settlement_quantity: number;
+  next_settle_date?: string | null;
+  is_t2_sell_allowed: boolean;
   opened_at: string;
 }
 
@@ -106,6 +112,7 @@ export interface DemoSessionOverviewData {
   trade_count: number;
   holdings_count: number;
   holdings: DemoHoldingOverviewItem[];
+  tp_slot_pct: number;
   strategy_cash_overview: DemoStrategyCashOverviewItem[];
   created_at: string;
   updated_at: string;
@@ -235,6 +242,54 @@ export async function transferDemoStrategyCash(
       },
     });
     return response.data.data;
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function updateDemoTpSlotPct(sessionId: string, tpSlotPct: number): Promise<number> {
+  try {
+    const response = await httpClient.post<{ success: boolean; data: { session_id: string; tp_slot_pct: number } }>(
+      "/auto-trading/demo/exit-config/tp-slot",
+      { tp_slot_pct: tpSlotPct },
+      {
+        headers: {
+          "X-Demo-Session-Id": sessionId,
+        },
+      },
+    );
+    return Number(response.data.data?.tp_slot_pct ?? tpSlotPct);
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function upsertDemoSymbolExitLevels(
+  sessionId: string,
+  body: { symbol: string; take_profit_price: number; stoploss_price: number },
+): Promise<void> {
+  try {
+    await httpClient.post(
+      "/auto-trading/demo/exit-config/symbol-levels",
+      body,
+      {
+        headers: {
+          "X-Demo-Session-Id": sessionId,
+        },
+      },
+    );
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function deleteDemoSymbolExitLevels(sessionId: string, symbol: string): Promise<void> {
+  try {
+    await httpClient.delete(`/auto-trading/demo/exit-config/symbol-levels/${encodeURIComponent(symbol)}`, {
+      headers: {
+        "X-Demo-Session-Id": sessionId,
+      },
+    });
   } catch (error) {
     throw normalizeError(error);
   }

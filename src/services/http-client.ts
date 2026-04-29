@@ -1,8 +1,18 @@
 import axios, { AxiosError } from "axios";
 import type { AppError } from "@/types/api";
 
-const baseURL =
-  process.env.NEXT_PUBLIC_API_BASE_URL?.trim() || "http://127.0.0.1:8000";
+function resolveApiBaseUrl(): string {
+  const isServerRuntime = typeof window === "undefined";
+  if (isServerRuntime) {
+    const serverBaseUrl = process.env.API_BASE_URL?.trim();
+    if (serverBaseUrl) {
+      return serverBaseUrl;
+    }
+  }
+  return process.env.NEXT_PUBLIC_API_BASE_URL?.trim() || "http://127.0.0.1:8000";
+}
+
+const baseURL = resolveApiBaseUrl();
 
 export const httpClient = axios.create({
   baseURL,

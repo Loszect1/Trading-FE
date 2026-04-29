@@ -287,6 +287,18 @@ export async function fetchMailSignalsLatest(): Promise<MailSignalsData | null> 
   }
 }
 
+export async function postMailSignalsRunOnce(): Promise<MailSignalsData | null> {
+  try {
+    const response = await httpClient.post<{ success: boolean; data: MailSignalsData | null }>(
+      "/automation/mail-signals/run-once",
+      {},
+    );
+    return response.data.data ?? null;
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
 export async function fetchMailSignalEntryRunLatest(): Promise<MailSignalEntryRunData | null> {
   try {
     const response = await httpClient.get<{ success: boolean; data: MailSignalEntryRunData | null }>(
@@ -350,6 +362,18 @@ export async function fetchShortTermLiquidityEligibleCache(
       data: response.data.data ?? [],
       meta: response.data.meta,
     };
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function postShortTermPostCloseRefreshRunOnce(): Promise<Record<string, unknown>> {
+  try {
+    const response = await httpClient.post<{ success: boolean; data: Record<string, unknown> }>(
+      "/automation/short-term/post-close-refresh/run-once",
+      {},
+    );
+    return response.data.data ?? {};
   } catch (error) {
     throw normalizeError(error);
   }
