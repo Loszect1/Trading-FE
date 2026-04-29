@@ -198,6 +198,17 @@ export async function toggleScheduler(accountMode: "REAL" | "DEMO", enabled: boo
   }
 }
 
+export async function toggleRealScanOnlyScheduler(enabled: boolean): Promise<Record<string, unknown>> {
+  try {
+    const response = await httpClient.post<Record<string, unknown>>("/automation/scheduler/real-scan-only/toggle", {
+      enabled,
+    });
+    return response.data;
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
 export async function fetchSchedulerStateRows(): Promise<SchedulerStateRow[]> {
   try {
     const response = await httpClient.get<{ success: boolean; data: SchedulerStateRow[] }>("/automation/scheduler/state");

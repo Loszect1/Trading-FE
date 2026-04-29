@@ -54,6 +54,7 @@ import {
   SHORT_TERM_RUN_LOG_SCOPE_ORDER,
   shortTermRunLogScopeBucket,
   toggleScheduler,
+  toggleRealScanOnlyScheduler,
   type ShortTermAutomationRunRow,
   type ShortTermAsyncJobStatus,
   type ShortTermExchangeScope,
@@ -76,9 +77,14 @@ import {
 
 type AccountTab = "real" | "demo";
 
+type RealAutomationMode = "SCAN_ONLY" | "AUTO_TRADING";
+
 const DEMO_INITIAL_CASH_VND = 100_000_000;
 const AUTO_TRADING_BACKEND_LOGS_PER_SCOPE = 5;
 const DNSE_DEPOSIT_QR_URL = (process.env.NEXT_PUBLIC_DNSE_DEPOSIT_QR_URL ?? "/QR_Code.png").trim();
+
+const REAL_AUTOMATION_MODE_STORAGE_KEY = "real_automation_mode";
+const REAL_SCAN_ONLY_SCHEDULE_ENABLED_STORAGE_KEY = "real_scan_only_schedule_enabled";
 
 interface DemoPosition {
   symbol: string;
@@ -390,7 +396,8 @@ const HOLDINGS_BAR_COLOR = "#a78bfa";
 
 export function AutoTradingClient() {
   const { showToast } = useToast();
-  const realAutoScheduleBusyRef = useRef(false);
+  const realScanOnlySchedulerToggleBusyRef = useRef(false);
+  const lastRealScanOnlyScheduleEnabledRef = useRef<boolean | null>(null);
   const [accountTab, setAccountTab] = useState<AccountTab>("real");
   const [schedulerStatus, setSchedulerStatus] = useState<{
     account_mode: "REAL" | "DEMO";
@@ -402,6 +409,9 @@ export function AutoTradingClient() {
   } | null>(null);
   const [schedulerBusy, setSchedulerBusy] = useState(false);
   const [schedulerError, setSchedulerError] = useState("");
+
+  const [realAutomationMode, setRealAutomationMode] = useState<RealAutomationMode>("SCAN_ONLY");
+  const [realScanOnlyScheduleEnabled, setRealScanOnlyScheduleEnabled] = useState(false);
   const [automationRuns, setAutomationRuns] = useState<ShortTermAutomationRunRow[]>([]);
   const [automationRunsError, setAutomationRunsError] = useState("");
   const [mailSignals, setMailSignals] = useState<MailSignalsData | null>(null);
@@ -678,7 +688,44 @@ export function AutoTradingClient() {
 
   useEffect(() => {
     setSessionActive(hasDnseSession());
+
+    // Restore REAL automation configuration from localStorage.
+    try {
+      const modeRaw = window.localStorage.getItem(REAL_AUTOMATION_MODE_STORAGE_KEY) ?? "";
+      const mode = modeRaw.trim().toUpperCase();
+      if (mode === "SCAN_ONLY" || mode === "AUTO_TRADING") {
+        setRealAutomationMode(mode);
+      }
+
+      const scanEnabledRaw = window.localStorage.getItem(REAL_SCAN_ONLY_SCHEDULE_ENABLED_STORAGE_KEY);
+      if (scanEnabledRaw === "1" || scanEnabledRaw === "true") {
+        setRealScanOnlyScheduleEnabled(true);
+      } else if (scanEnabledRaw === "0" || scanEnabledRaw === "false") {
+        setRealScanOnlyScheduleEnabled(false);
+      }
+    } catch {
+      // Ignore storage failures; UI still works with defaults.
+    }
   }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(REAL_AUTOMATION_MODE_STORAGE_KEY, realAutomationMode);
+    } catch {
+      // ignore
+    }
+  }, [realAutomationMode]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        REAL_SCAN_ONLY_SCHEDULE_ENABLED_STORAGE_KEY,
+        realScanOnlyScheduleEnabled ? "1" : "0",
+      );
+    } catch {
+      // ignore
+    }
+  }, [realScanOnlyScheduleEnabled]);
 
   const pushDemoLog = useCallback((line: string) => {
     setDemoLog((prev) => [...prev.slice(-80), `${new Date().toISOString()} ${line}`]);
@@ -1198,87 +1245,9 @@ export function AutoTradingClient() {
     schedulerStatus?.interval_minutes,
   ]);
 
-  useEffect(() => {
-    if (accountTab !== "real") {
-      return;
-    }
-    const slotKeyName = "real_auto_trading_last_15m_slot";
-    const tick = async () => {
-      try {
-        if (!sessionActive) {
-          return;
-        }
-        if (!schedulerStatus?.enabled) {
-          return;
-        }
-        if (realAutoScheduleBusyRef.current) {
-          return;
-        }
-        const now = new Date();
-        if (!isInVnTradingSession(now)) {
-          return;
-        }
-        const vnFormatter = new Intl.DateTimeFormat("sv-SE", {
-          timeZone: "Asia/Ho_Chi_Minh",
-          year: "numeric",
-          month: "2-digit",
-          day: "2-digit",
-          hour: "2-digit",
-          minute: "2-digit",
-          hour12: false,
-        });
-        const vnText = vnFormatter.format(now).replace(" ", "T");
-        const { hour, minute } = getVnHourMinute(now);
-        if (minute % 15 !== 0) {
-          return;
-        }
-        const slotKey = `${vnText.slice(0, 10)}-${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
-        const lastSlot = typeof window !== "undefined" ? window.localStorage.getItem(slotKeyName) ?? "" : "";
-        if (lastSlot === slotKey) {
-          return;
-        }
-        const subAccountsRes = await fetchDnseSubAccounts({});
-        const subAccountRows = extractDnseRecords(subAccountsRes);
-        const subAccounts = pickSubAccountNumbers(subAccountRows);
-        const selectedSubAccount = subAccounts[0];
-        if (!selectedSubAccount) {
-          throw new Error("Khong tim thay sub-account DNSE de lay so du REAL.");
-        }
-        const balanceRes = await fetchDnseAccountBalance({ sub_account: selectedSubAccount });
-        const balanceRows = extractDnseRecords(balanceRes);
-        const tradableCash = extractRealSchedulerCashFromRows(balanceRows);
-        if (tradableCash == null || tradableCash <= 0) {
-          throw new Error("Khong lay duoc availableCash/purchasingPower REAL tu DNSE.");
-        }
-        realAutoScheduleBusyRef.current = true;
-        await postShortTermRunCycle({
-          exchange_scope: "ALL",
-          account_mode: "REAL",
-          async_for_heavy: true,
-          enforce_vn_scan_schedule: false,
-          real_account_available_cash_vnd: tradableCash,
-        });
-        await postMailSignalEntryRunOnce({
-          account_mode: "REAL",
-          real_account_available_cash_vnd: tradableCash,
-        });
-        if (typeof window !== "undefined") {
-          window.localStorage.setItem(slotKeyName, slotKey);
-        }
-        await Promise.all([loadAutomationRuns(), loadMailSignalEntryRuns()]);
-      } catch (error) {
-        const message = isAppError(error) ? error.message : "Khong trigger duoc lich REAL auto trading.";
-        setManualCycleError(message);
-      } finally {
-        realAutoScheduleBusyRef.current = false;
-      }
-    };
-    void tick();
-    const id = window.setInterval(() => {
-      void tick();
-    }, 30_000);
-    return () => window.clearInterval(id);
-  }, [accountTab, sessionActive, schedulerStatus?.enabled, loadAutomationRuns, loadMailSignalEntryRuns]);
+  // FE no longer performs the scan-only schedule.
+  // Backend scheduler (REAL mode) is responsible for calling /automation/real/recommendations/scan
+  // on the VN trading grid every interval.
 
   const handleDnseLogin = async () => {
     setSessionBusy(true);
@@ -1472,10 +1441,100 @@ export function AutoTradingClient() {
     }
   };
 
+  // Keep backend scheduler aligned with REAL mode selection.
+  // - SCAN_ONLY: production scheduler must be disabled; scan-only scheduler follows master toggle.
+  // - AUTO_TRADING: scan-only scheduler must be disabled; production scheduler follows master toggle.
+  useEffect(() => {
+    if (!schedulerStatus) {
+      return;
+    }
+    if (schedulerBusy) {
+      return;
+    }
+    // This sync effect is meant to control REAL backend scheduler behavior.
+    // When user is on the Demo tab, schedulerAccountMode becomes "DEMO" and calling
+    // handleToggleScheduler() would incorrectly toggle DEMO auto scheduling.
+    if (accountTab !== "real") {
+      return;
+    }
+
+    const sync = async () => {
+      if (realAutomationMode === "SCAN_ONLY") {
+        // Disable production scheduler for REAL.
+        if (schedulerStatus.enabled) {
+          await handleToggleScheduler();
+        }
+
+        // Enable/disable scan-only scheduler.
+        const desiredScanOnlyEnabled = realScanOnlyScheduleEnabled;
+        if (
+          lastRealScanOnlyScheduleEnabledRef.current !== desiredScanOnlyEnabled &&
+          !realScanOnlySchedulerToggleBusyRef.current
+        ) {
+          realScanOnlySchedulerToggleBusyRef.current = true;
+          try {
+            setSchedulerError("");
+            await toggleRealScanOnlyScheduler(desiredScanOnlyEnabled);
+            lastRealScanOnlyScheduleEnabledRef.current = desiredScanOnlyEnabled;
+          } catch (error) {
+            setSchedulerError(isAppError(error) ? error.message : "Khong toggle duoc schedule SCAN_ONLY tren BE.");
+          } finally {
+            realScanOnlySchedulerToggleBusyRef.current = false;
+          }
+        }
+        return;
+      }
+
+      // AUTO_TRADING: disable scan-only scheduler.
+      const desiredScanOnlyEnabled = false;
+      if (
+        lastRealScanOnlyScheduleEnabledRef.current !== desiredScanOnlyEnabled &&
+        !realScanOnlySchedulerToggleBusyRef.current
+      ) {
+        realScanOnlySchedulerToggleBusyRef.current = true;
+        try {
+          setSchedulerError("");
+          await toggleRealScanOnlyScheduler(false);
+          lastRealScanOnlyScheduleEnabledRef.current = false;
+        } catch (error) {
+          setSchedulerError(isAppError(error) ? error.message : "Khong toggle duoc schedule SCAN_ONLY OFF tren BE.");
+        } finally {
+          realScanOnlySchedulerToggleBusyRef.current = false;
+        }
+      }
+
+      // Production scheduler follows master toggle.
+      const desiredBackendEnabled = realScanOnlyScheduleEnabled;
+      if (schedulerStatus.enabled !== desiredBackendEnabled) {
+        await handleToggleScheduler();
+      }
+    };
+
+    void sync();
+  }, [
+    accountTab,
+    schedulerStatus,
+    schedulerBusy,
+    realAutomationMode,
+    realScanOnlyScheduleEnabled,
+    handleToggleScheduler,
+  ]);
+
   const handleManualShortTermCycle = async () => {
     setManualCycleBusy(true);
     setManualCycleError("");
     try {
+      if (schedulerAccountMode === "REAL") {
+        await postRealRecommendationsScan({
+          exchange_scope: manualCycleExchangeScope,
+        });
+        setManualCycleAsyncJobId(null);
+        setManualCycleAsyncStatus(null);
+        setManualCycleAsyncNotified(false);
+        await Promise.all([loadRealRecommendations(), loadAutomationRuns()]);
+        showToast("REAL manual cycle da chuyen sang scan-only recommendations.", "success");
+        return;
+      }
       const response = await postShortTermRunCycle({
         exchange_scope: manualCycleExchangeScope,
         account_mode: schedulerAccountMode,
@@ -1635,6 +1694,67 @@ export function AutoTradingClient() {
             <p className="mt-3 text-xs text-slate-500">
               {sessionActive ? UI_TEXT.dnse.sessionActive : UI_TEXT.dnse.sessionNone}
             </p>
+            <div className="mt-3 flex flex-col gap-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setRealAutomationMode("SCAN_ONLY")}
+                  className={`rounded-md border px-3 py-1.5 text-xs font-semibold transition ${
+                    realAutomationMode === "SCAN_ONLY"
+                      ? "border-cyan-300/70 bg-cyan-300/25 text-cyan-50 shadow-[0_0_0_1px_rgba(103,232,249,0.35)]"
+                      : "border-white/10 bg-transparent text-slate-400 hover:border-white/20 hover:bg-white/5 hover:text-slate-200"
+                  }`}
+                  disabled={schedulerBusy}
+                >
+                  Scan only
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRealAutomationMode("AUTO_TRADING")}
+                  className={`rounded-md border px-3 py-1.5 text-xs font-semibold transition ${
+                    realAutomationMode === "AUTO_TRADING"
+                      ? "border-cyan-300/70 bg-cyan-300/25 text-cyan-50 shadow-[0_0_0_1px_rgba(103,232,249,0.35)]"
+                      : "border-white/10 bg-transparent text-slate-400 hover:border-white/20 hover:bg-white/5 hover:text-slate-200"
+                  }`}
+                  disabled={schedulerBusy}
+                >
+                  Auto trading
+                </button>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                {realAutomationMode === "SCAN_ONLY" ? (
+                  <>
+                    <span className="text-xs text-slate-400">
+                      Scan-only schedule: {realScanOnlyScheduleEnabled ? "ON" : "OFF"}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setRealScanOnlyScheduleEnabled((v) => !v)}
+                      disabled={schedulerBusy}
+                      className="rounded-md border border-cyan-300/40 px-3 py-2 text-xs font-semibold text-cyan-100 disabled:opacity-50"
+                    >
+                      {realScanOnlyScheduleEnabled ? "Tat scan" : "Bat scan"}
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-xs text-slate-400">
+                      Auto REAL backend: {schedulerStatus?.enabled ? "ON" : "OFF"} /{" "}
+                      {schedulerStatus?.running ? "RUNNING" : "STOPPED"}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setRealScanOnlyScheduleEnabled((v) => !v)}
+                      disabled={schedulerBusy}
+                      className="rounded-md border border-cyan-300/40 px-3 py-2 text-xs font-semibold text-cyan-100 disabled:opacity-50"
+                    >
+                      {realScanOnlyScheduleEnabled ? "Tat Auto" : "Bat Auto"}
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
             {!sessionActive ? (
               <div className="mt-4 grid gap-4 md:grid-cols-2">
                 <div className="flex flex-col gap-2">
@@ -2090,7 +2210,9 @@ export function AutoTradingClient() {
 
           <section className="glass-panel rounded-2xl p-6">
             <h3 className="text-sm font-semibold text-slate-200">Real Scan Logs (Short-term + Mail Signals)</h3>
-            <p className="mt-1 text-xs text-slate-500">Chi hien thi log account_mode REAL, 10 ban ghi gan nhat moi loai.</p>
+            <p className="mt-1 text-xs text-slate-500">
+              REAL mode scan/recommend-only. Chi hien thi log account_mode REAL, 10 ban ghi gan nhat moi loai.
+            </p>
             <div className="mt-3 grid gap-4 lg:grid-cols-2">
               <div className="rounded-md border border-white/10 bg-black/20 p-3">
                 <div className="flex flex-wrap items-end justify-between gap-2">
@@ -2120,9 +2242,7 @@ export function AutoTradingClient() {
                           <span className="text-cyan-200">{formatDateTime(run.started_at)}</span> |{" "}
                           <span className={automationRunStatusClass(run.run_status)}>{run.run_status}</span>
                         </p>
-                        <p className="text-slate-400">
-                          scan={run.scanned} | buy={run.buy_candidates} | exec={run.executed} | err={run.errors}
-                        </p>
+                        <p className="text-slate-400">scan={run.scanned} | recommend={run.buy_candidates} | err={run.errors}</p>
                       </div>
                     ))}
                   </div>
@@ -2139,7 +2259,7 @@ export function AutoTradingClient() {
                         <p>
                           <span className="text-cyan-200">{formatDateTime(run.ran_at)}</span> |{" "}
                           <span className="text-violet-300">scanned={run.scanned}</span> |{" "}
-                          <span className="text-emerald-300">executed={run.executed.length}</span> |{" "}
+                          <span className="text-emerald-300">recommend={run.executed.length}</span> |{" "}
                           <span className="text-rose-300">skipped={run.skipped.length}</span>
                         </p>
                         <p className="text-slate-500">source={run.source_key || "-"}</p>

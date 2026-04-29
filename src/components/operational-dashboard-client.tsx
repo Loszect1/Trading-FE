@@ -387,14 +387,19 @@ export function OperationalDashboardClient() {
   const [demoSessions, setDemoSessions] = useState<Array<{ session_id: string; created_at: string }>>([]);
   const [demoSessionsLoading, setDemoSessionsLoading] = useState(false);
 
-  const loadRealAccountInfo = useCallback(async () => {
+  const loadRealAccountInfo = useCallback(async (): Promise<{
+    accountRows: Record<string, unknown>[];
+    subRows: Record<string, unknown>[];
+    balanceRows: Record<string, unknown>[];
+    selectedSubAccount: string;
+  }> => {
     if (!hasDnseSession()) {
       setDnseAccountRows([]);
       setDnseSubAccountRows([]);
       setDnseBalanceRows([]);
       setDnseSelectedSubAccount("");
       setDnseAccountError(UI_TEXT.operations.realAccountNeedSession);
-      return;
+      return { accountRows: [], subRows: [], balanceRows: [], selectedSubAccount: "" };
     }
 
     const [accountResult, subAccountResult] = await Promise.allSettled([fetchDnseAccount({}), fetchDnseSubAccounts({})]);
@@ -423,6 +428,7 @@ export function OperationalDashboardClient() {
     setDnseBalanceRows(balanceRows);
     setDnseSelectedSubAccount(selectedSubAccount);
     setDnseAccountError(null);
+    return { accountRows, subRows, balanceRows, selectedSubAccount };
   }, []);
 
   const loadDemoAccountInfo = useCallback(async (): Promise<DemoAccountData | null> => {
@@ -513,8 +519,24 @@ export function OperationalDashboardClient() {
     const errMsg = (e: unknown) => (isAppError(e) ? e.message : UI_TEXT.operations.loadFailed);
 
     if (mode === "REAL") {
+      let realInfo: {
+        accountRows: Record<string, unknown>[];
+        subRows: Record<string, unknown>[];
+        balanceRows: Record<string, unknown>[];
+        selectedSubAccount: string;
+      } = { accountRows: [], subRows: [], balanceRows: [], selectedSubAccount: "" };
+      try {
+        realInfo = await loadRealAccountInfo();
+      } catch (error) {
+        setDnseAccountRows([]);
+        setDnseSubAccountRows([]);
+        setDnseBalanceRows([]);
+        setDnseSelectedSubAccount("");
+        setDnseAccountError(isAppError(error) ? error.message : UI_TEXT.operations.loadFailed);
+      }
+
       const settled = await Promise.allSettled([
-        fetchMonitoringSummary(mode),
+        fetchMonitoringSummary(mode, { subAccount: realInfo.selectedSubAccount }),
         listSignals({ limit: 100 }),
         getCoreOrders(mode, 100),
         getCorePositions(mode),
@@ -579,15 +601,6 @@ export function OperationalDashboardClient() {
         setSchedulerError(errMsg(settled[6].reason));
       }
 
-      try {
-        await loadRealAccountInfo();
-      } catch (error) {
-        setDnseAccountRows([]);
-        setDnseSubAccountRows([]);
-        setDnseBalanceRows([]);
-        setDnseSelectedSubAccount("");
-        setDnseAccountError(isAppError(error) ? error.message : UI_TEXT.operations.loadFailed);
-      }
       setDemoAccount(null);
       setDemoAccountError(null);
       try {
