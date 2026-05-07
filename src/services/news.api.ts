@@ -1,4 +1,4 @@
-import { getWithRetryCache } from "@/services/http-client";
+import { API_REQUEST_TIMEOUT_MS, getWithRetryCache } from "@/services/http-client";
 import type { NewsCategoryParam, NewsListResponse } from "@/types/news";
 
 const DEFAULT_PER_FEED = 5;
@@ -24,7 +24,7 @@ export async function fetchAggregatedNews(
   const queryPath = forceRefresh ? `${path}&force_refresh=true` : path;
 
   return getWithRetryCache<NewsListResponse>(queryPath, {
-    timeoutMs: 90000,
+    timeoutMs: API_REQUEST_TIMEOUT_MS,
     retries: 1,
     retryDelayMs: 800,
     cacheTtlMs: forceRefresh ? 0 : 60_000,

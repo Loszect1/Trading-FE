@@ -136,6 +136,17 @@ export interface RealRecommendationRow {
   reason: string;
 }
 
+export interface ShortTermScanDiagnostics {
+  skipped_insufficient_data?: number;
+  skipped_low_liquidity?: number;
+  skipped_no_volume_spike?: number;
+  skipped_entry_gate?: number;
+  skipped_experience_cooldown?: number;
+  skipped_dynamic_buy_floor?: number;
+  dynamic_buy_composite_floor?: number;
+  buy_signals_written?: number;
+}
+
 export interface RealRecommendationsData {
   generated_at?: string | null;
   exchange_scope?: ShortTermExchangeScope | string;
@@ -143,6 +154,15 @@ export interface RealRecommendationsData {
   scanned: number;
   recommendations: RealRecommendationRow[];
   count: number;
+  short_term_recommendations?: RealRecommendationRow[];
+  short_term_count?: number;
+  mail_signal_recommendations?: RealRecommendationRow[];
+  mail_signal_count?: number;
+  scan_diagnostics?: ShortTermScanDiagnostics | null;
+}
+
+export interface RealRecommendationsRecentRow extends RealRecommendationsData {
+  redis_key: string;
 }
 
 export interface RealRecommendationScanRequest {
@@ -203,6 +223,15 @@ export async function toggleRealScanOnlyScheduler(enabled: boolean): Promise<Rec
     const response = await httpClient.post<Record<string, unknown>>("/automation/scheduler/real-scan-only/toggle", {
       enabled,
     });
+    return response.data;
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function fetchRealScanOnlySchedulerStatus(): Promise<SchedulerStatus & { mode?: string }> {
+  try {
+    const response = await httpClient.get<SchedulerStatus & { mode?: string }>("/automation/scheduler/real-scan-only/status");
     return response.data;
   } catch (error) {
     throw normalizeError(error);
@@ -397,6 +426,17 @@ export async function fetchRealRecommendationsLatest(): Promise<RealRecommendati
       "/automation/real/recommendations/latest",
     );
     return response.data.data;
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function fetchRealRecommendationsRecent(limit = 10): Promise<RealRecommendationsRecentRow[]> {
+  try {
+    const response = await httpClient.get<{ success: boolean; data: RealRecommendationsRecentRow[] }>(
+      `/automation/real/recommendations/recent?limit=${encodeURIComponent(String(limit))}`,
+    );
+    return response.data.data ?? [];
   } catch (error) {
     throw normalizeError(error);
   }

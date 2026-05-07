@@ -1,9 +1,9 @@
 import axios from "axios";
 import { clearDnseSession, getDnseAccessToken, setDnseSession } from "@/lib/dnse-session";
-import { httpClient, normalizeError } from "@/services/http-client";
+import { API_REQUEST_TIMEOUT_MS, httpClient, normalizeError } from "@/services/http-client";
 
 /** DNSE calls can exceed default API timeout (login, OTP, place order). */
-const DNSE_REQUEST_TIMEOUT_MS = 600_000;
+const DNSE_REQUEST_TIMEOUT_MS = API_REQUEST_TIMEOUT_MS;
 
 function applyDnseSessionAuth<T extends Record<string, unknown>>(payload: T): T {
   const token = getDnseAccessToken()?.trim();

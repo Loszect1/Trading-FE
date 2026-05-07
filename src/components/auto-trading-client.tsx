@@ -39,6 +39,8 @@ import {
 } from "@/services/auto-trading.api";
 import {
   fetchRealRecommendationsLatest,
+  fetchRealRecommendationsRecent,
+  fetchRealScanOnlySchedulerStatus,
   fetchShortTermLiquidityEligibleCache,
   fetchMailSignalEntryRunsRecent,
   fetchMailSignalsLatest,
@@ -61,7 +63,9 @@ import {
   type MailSignalEntryRunData,
   type ShortTermRunLogScopeBucket,
   type RealRecommendationRow,
+  type RealRecommendationsRecentRow,
   type LiquidityEligibleCacheRow,
+  type ShortTermScanDiagnostics,
 } from "@/services/automation.api";
 import { getSymbolDailyQuoteSnapshot } from "@/services/vnstock.api";
 import {
@@ -77,6 +81,7 @@ import {
 type AccountTab = "real" | "demo";
 
 type RealAutomationMode = "SCAN_ONLY" | "AUTO_TRADING";
+type RealLogsTab = "SCAN_ONLY" | "AUTO_TRADING";
 
 const DEMO_INITIAL_CASH_VND = 100_000_000;
 const AUTO_TRADING_BACKEND_LOGS_PER_SCOPE = 5;
@@ -84,6 +89,30 @@ const DNSE_DEPOSIT_QR_URL = (process.env.NEXT_PUBLIC_DNSE_DEPOSIT_QR_URL ?? "/QR
 
 const REAL_AUTOMATION_MODE_STORAGE_KEY = "real_automation_mode";
 const REAL_SCAN_ONLY_SCHEDULE_ENABLED_STORAGE_KEY = "real_scan_only_schedule_enabled";
+
+function formatShortTermScanDiagnostics(d: ShortTermScanDiagnostics | null | undefined): string {
+  if (!d || typeof d !== "object") {
+    return "";
+  }
+  const parts: string[] = [];
+  const add = (label: string, value: number | undefined) => {
+    if (value === undefined || !Number.isFinite(value)) {
+      return;
+    }
+    parts.push(`${label}=${value}`);
+  };
+  add("insuff_data", d.skipped_insufficient_data);
+  add("low_liq", d.skipped_low_liquidity);
+  add("no_spike", d.skipped_no_volume_spike);
+  add("entry_gate", d.skipped_entry_gate);
+  add("cooldown", d.skipped_experience_cooldown);
+  add("dyn_buy_floor", d.skipped_dynamic_buy_floor);
+  if (typeof d.dynamic_buy_composite_floor === "number" && Number.isFinite(d.dynamic_buy_composite_floor)) {
+    parts.push(`composite_buy_floor=${d.dynamic_buy_composite_floor}`);
+  }
+  add("buy_signals_db", d.buy_signals_written);
+  return parts.join(" | ");
+}
 
 interface DemoPosition {
   symbol: string;
@@ -166,6 +195,18 @@ function formatDateTime(iso: string): string {
     return iso;
   }
   return d.toLocaleString("vi-VN", { hour12: false });
+}
+
+function isWithinFreshWindow(iso: string | null, freshMinutes: number): boolean {
+  if (!iso) {
+    return false;
+  }
+  const ts = new Date(iso).getTime();
+  if (Number.isNaN(ts)) {
+    return false;
+  }
+  const windowMs = Math.max(1, Math.trunc(freshMinutes)) * 60_000;
+  return Date.now() - ts <= windowMs;
 }
 
 const DEMO_SESSION_STORAGE_KEY = "auto_trading_demo_session_id";
@@ -340,6 +381,13 @@ export function AutoTradingClient() {
   const [automationLogScopeFilter, setAutomationLogScopeFilter] = useState<"ANY" | ShortTermExchangeScope>("ANY");
   const [realRecommendations, setRealRecommendations] = useState<RealRecommendationRow[]>([]);
   const [realRecommendationsGeneratedAt, setRealRecommendationsGeneratedAt] = useState<string | null>(null);
+  const [realRecommendationsScannedCount, setRealRecommendationsScannedCount] = useState<number | null>(null);
+  const [realRecommendationsScanDiagnostics, setRealRecommendationsScanDiagnostics] = useState<ShortTermScanDiagnostics | null>(
+    null,
+  );
+  const [realRecommendationsFreshMinutes, setRealRecommendationsFreshMinutes] = useState(30);
+  const [realMailSignalRecommendations, setRealMailSignalRecommendations] = useState<RealRecommendationRow[]>([]);
+  const [realRecommendationsRecentLogs, setRealRecommendationsRecentLogs] = useState<RealRecommendationsRecentRow[]>([]);
   const [realRecommendationsBusy, setRealRecommendationsBusy] = useState(false);
   const [realRecommendationsError, setRealRecommendationsError] = useState("");
   const [realRecommendationBuyBusySymbol, setRealRecommendationBuyBusySymbol] = useState("");
@@ -353,6 +401,7 @@ export function AutoTradingClient() {
   const [realPendingDetailError, setRealPendingDetailError] = useState("");
   const [realHoldingSellBusySymbol, setRealHoldingSellBusySymbol] = useState("");
   const [realShortTermLogScopeFilter, setRealShortTermLogScopeFilter] = useState<"ANY" | ShortTermExchangeScope>("ANY");
+  const [realLogsTab, setRealLogsTab] = useState<RealLogsTab>("SCAN_ONLY");
 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -440,7 +489,12 @@ export function AutoTradingClient() {
       ].filter((block) => block.groups.length > 0);
     }
     const selectedSessionRows = scopedRuns.filter((run) => {
-      const runSid = String((run.detail?.demo_session_id as string | undefined) || "").trim();
+      const rawSid = run.detail?.demo_session_id;
+      const runSid =
+        rawSid === null || rawSid === undefined ? "" : String(rawSid).trim();
+      if (!runSid) {
+        return true;
+      }
       return runSid === demoSessionId;
     });
     return [
@@ -493,6 +547,18 @@ export function AutoTradingClient() {
       .sort((a, b) => b.value - a.value)
       .slice(0, 8);
   }, [demoOverview]);
+  const realRecommendationsFresh = useMemo(
+    () => isWithinFreshWindow(realRecommendationsGeneratedAt, realRecommendationsFreshMinutes),
+    [realRecommendationsFreshMinutes, realRecommendationsGeneratedAt],
+  );
+  const visibleRealRecommendations = useMemo(
+    () => (realRecommendationsFresh ? realRecommendations : []),
+    [realRecommendations, realRecommendationsFresh],
+  );
+  const visibleRealMailSignalRecommendations = useMemo(
+    () => (realRecommendationsFresh ? realMailSignalRecommendations : []),
+    [realMailSignalRecommendations, realRecommendationsFresh],
+  );
 
   const credsPayload = useCallback(() => {
     const u = username.trim();
@@ -694,6 +760,17 @@ export function AutoTradingClient() {
     try {
       const status = await fetchSchedulerStatus(schedulerAccountMode);
       setSchedulerStatus(status);
+      if (schedulerAccountMode === "REAL") {
+        const scanOnlyStatus = await fetchRealScanOnlySchedulerStatus();
+        const scanOnlyEnabled = Boolean(scanOnlyStatus.enabled);
+        setRealScanOnlyScheduleEnabled(scanOnlyEnabled);
+        lastRealScanOnlyScheduleEnabledRef.current = scanOnlyEnabled;
+        if (scanOnlyEnabled) {
+          setRealAutomationMode("SCAN_ONLY");
+        } else if (status.enabled) {
+          setRealAutomationMode("AUTO_TRADING");
+        }
+      }
       setSchedulerError("");
     } catch (error) {
       setSchedulerStatus(null);
@@ -751,13 +828,22 @@ export function AutoTradingClient() {
 
   const loadRealRecommendations = useCallback(async () => {
     try {
-      const response = await fetchRealRecommendationsLatest();
+      const [response, recent] = await Promise.all([fetchRealRecommendationsLatest(), fetchRealRecommendationsRecent(10)]);
       setRealRecommendations(response.recommendations ?? []);
+      setRealMailSignalRecommendations(response.mail_signal_recommendations ?? []);
       setRealRecommendationsGeneratedAt(response.generated_at ?? null);
+      const scanned = Number(response.scanned ?? 0);
+      setRealRecommendationsScannedCount(Number.isFinite(scanned) ? scanned : null);
+      setRealRecommendationsScanDiagnostics(response.scan_diagnostics ?? null);
+      setRealRecommendationsRecentLogs(recent);
       setRealRecommendationsError("");
     } catch (error) {
       setRealRecommendations([]);
+      setRealMailSignalRecommendations([]);
       setRealRecommendationsGeneratedAt(null);
+      setRealRecommendationsScannedCount(null);
+      setRealRecommendationsScanDiagnostics(null);
+      setRealRecommendationsRecentLogs([]);
       setRealRecommendationsError(isAppError(error) ? error.message : "Khong tai duoc danh sach khuyen nghi REAL.");
     }
   }, []);
@@ -912,9 +998,18 @@ export function AutoTradingClient() {
         limit_symbols: 0,
       });
       setRealRecommendations(response.recommendations ?? []);
+      setRealMailSignalRecommendations(response.mail_signal_recommendations ?? []);
       setRealRecommendationsGeneratedAt(response.generated_at ?? null);
+      const scanned = Number(response.scanned ?? 0);
+      setRealRecommendationsScannedCount(Number.isFinite(scanned) ? scanned : null);
+      setRealRecommendationsScanDiagnostics(response.scan_diagnostics ?? null);
+      const recent = await fetchRealRecommendationsRecent(10);
+      setRealRecommendationsRecentLogs(recent);
       setRealRecommendationsError("");
-      showToast(`Da luu ${Number(response.count || 0)} khuyen nghi BUY vao Redis.`, "success");
+      showToast(
+        `Da luu short-term=${Number(response.short_term_count ?? response.count ?? 0)}, mail=${Number(response.mail_signal_count ?? 0)}.`,
+        "success",
+      );
     } catch (error) {
       const message = isAppError(error) ? error.message : "Scan recommendations REAL that bai.";
       setRealRecommendationsError(message);
@@ -1829,20 +1924,39 @@ export function AutoTradingClient() {
                   Scan xong se chi luu khuyen nghi vao Redis, khong tu dong dat lenh mua.
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={() => void handleScanRealRecommendations()}
-                disabled={realRecommendationsBusy || !sessionActive}
-                className="rounded-md border border-cyan-300/40 px-3 py-2 text-xs font-semibold text-cyan-100 disabled:opacity-50"
-              >
-                {realRecommendationsBusy ? "Dang scan recommendations..." : "Scan recommendations"}
-              </button>
+              <div className="flex items-end gap-2">
+                <label className="flex flex-col gap-1 text-[11px] text-slate-400">
+                  Fresh window (minutes)
+                  <select
+                    className="rounded-md border border-white/15 bg-black/30 px-2 py-1 font-mono text-[11px] text-slate-100"
+                    value={realRecommendationsFreshMinutes}
+                    onChange={(e) => setRealRecommendationsFreshMinutes(Number(e.target.value) || 30)}
+                  >
+                    <option value={15}>15</option>
+                    <option value={30}>30</option>
+                    <option value={60}>60</option>
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  onClick={() => void handleScanRealRecommendations()}
+                  disabled={realRecommendationsBusy || !sessionActive}
+                  className="rounded-md border border-cyan-300/40 px-3 py-2 text-xs font-semibold text-cyan-100 disabled:opacity-50"
+                >
+                  {realRecommendationsBusy ? "Dang scan recommendations..." : "Scan recommendations"}
+                </button>
+              </div>
             </div>
             {realRecommendationsError ? <p className="mt-2 text-xs text-rose-300">{realRecommendationsError}</p> : null}
             {realRecommendationsGeneratedAt ? (
               <p className="mt-2 text-[11px] text-slate-500">Generated: {formatDateTime(realRecommendationsGeneratedAt)}</p>
             ) : null}
-            {realRecommendations.length === 0 ? (
+            {!realRecommendationsFresh && realRecommendationsGeneratedAt ? (
+              <p className="mt-2 text-xs text-amber-300">
+                Recommendation da qua fresh window {realRecommendationsFreshMinutes} phut. Vui long scan lai truoc khi Action Buy.
+              </p>
+            ) : null}
+            {visibleRealRecommendations.length === 0 ? (
               <p className="mt-3 text-xs text-slate-500">Chua co khuyen nghi BUY trong Redis.</p>
             ) : (
               <div className="mt-3 overflow-x-auto">
@@ -1859,7 +1973,7 @@ export function AutoTradingClient() {
                     </tr>
                   </thead>
                   <tbody>
-                    {realRecommendations.map((item, idx) => (
+                    {visibleRealRecommendations.map((item, idx) => (
                       <tr key={`${item.symbol}-${idx}`} className="border-b border-white/5 align-top">
                         <td className="py-2 pr-3 font-mono text-cyan-200">{item.symbol}</td>
                         <td className="py-2 pr-3 text-slate-100">{formatPrice(item.entry)}</td>
@@ -1991,66 +2105,171 @@ export function AutoTradingClient() {
           </section>
 
           <section className="glass-panel rounded-2xl p-6">
-            <h3 className="text-sm font-semibold text-slate-200">Real Scan Logs (Short-term + Mail Signals)</h3>
-            <p className="mt-1 text-xs text-slate-500">
-              REAL mode scan/recommend-only. Chi hien thi log account_mode REAL, 10 ban ghi gan nhat moi loai.
-            </p>
-            <div className="mt-3 grid gap-4 lg:grid-cols-2">
-              <div className="rounded-md border border-white/10 bg-black/20 p-3">
-                <div className="flex flex-wrap items-end justify-between gap-2">
-                  <p className="text-xs font-semibold text-slate-300">Short-term scan logs (REAL)</p>
-                  <label className="flex flex-col gap-1 text-[11px] text-slate-400">
-                    Exchange scope
-                    <select
-                      className="rounded-md border border-white/15 bg-black/30 px-2 py-1 font-mono text-[11px] text-slate-100"
-                      value={realShortTermLogScopeFilter}
-                      onChange={(e) => setRealShortTermLogScopeFilter(e.target.value as "ANY" | ShortTermExchangeScope)}
-                    >
-                      <option value="ANY">ANY</option>
-                      <option value="ALL">ALL</option>
-                      <option value="HOSE">HOSE</option>
-                      <option value="HNX">HNX</option>
-                      <option value="UPCOM">UPCOM</option>
-                    </select>
-                  </label>
-                </div>
-                {realShortTermRuns.length === 0 ? (
-                  <p className="mt-2 text-[11px] text-slate-500">Chua co log short-term REAL.</p>
-                ) : (
-                  <div className="mt-2 max-h-72 space-y-2 overflow-y-auto text-[11px] font-mono text-slate-300">
-                    {realShortTermRuns.map((run) => (
-                      <div key={run.id} className="border-b border-white/5 pb-2">
-                        <p>
-                          <span className="text-cyan-200">{formatDateTime(run.started_at)}</span> |{" "}
-                          <span className={automationRunStatusClass(run.run_status)}>{run.run_status}</span>
-                        </p>
-                        <p className="text-slate-400">scan={run.scanned} | recommend={run.buy_candidates} | err={run.errors}</p>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-              <div className="rounded-md border border-white/10 bg-black/20 p-3">
-                <p className="text-xs font-semibold text-slate-300">Mail signals logs (REAL)</p>
-                {realMailSignalRunLogs.length === 0 ? (
-                  <p className="mt-2 text-[11px] text-slate-500">Chua co log mail signals REAL.</p>
-                ) : (
-                  <div className="mt-2 max-h-72 space-y-2 overflow-y-auto text-[11px] font-mono text-slate-300">
-                    {realMailSignalRunLogs.map((run, idx) => (
-                      <div key={`${run.redis_key}-${idx}`} className="border-b border-white/5 pb-2">
-                        <p>
-                          <span className="text-cyan-200">{formatDateTime(run.ran_at)}</span> |{" "}
-                          <span className="text-violet-300">scanned={run.scanned}</span> |{" "}
-                          <span className="text-emerald-300">recommend={run.executed.length}</span> |{" "}
-                          <span className="text-rose-300">skipped={run.skipped.length}</span>
-                        </p>
-                        <p className="text-slate-500">source={run.source_key || "-"}</p>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
+            <h3 className="text-sm font-semibold text-slate-200">Real Logs</h3>
+            <p className="mt-1 text-xs text-slate-500">Tach rieng log REAL theo 2 nhom: Scan only va Auto trading.</p>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setRealLogsTab("SCAN_ONLY")}
+                className={`rounded-md border px-3 py-1.5 text-xs font-semibold transition ${
+                  realLogsTab === "SCAN_ONLY"
+                    ? "border-cyan-300/70 bg-cyan-300/25 text-cyan-50"
+                    : "border-white/10 bg-transparent text-slate-400 hover:border-white/20 hover:text-slate-200"
+                }`}
+              >
+                Scan only
+              </button>
+              <button
+                type="button"
+                onClick={() => setRealLogsTab("AUTO_TRADING")}
+                className={`rounded-md border px-3 py-1.5 text-xs font-semibold transition ${
+                  realLogsTab === "AUTO_TRADING"
+                    ? "border-cyan-300/70 bg-cyan-300/25 text-cyan-50"
+                    : "border-white/10 bg-transparent text-slate-400 hover:border-white/20 hover:text-slate-200"
+                }`}
+              >
+                Auto trading
+              </button>
             </div>
+            {realLogsTab === "SCAN_ONLY" ? (
+              <div className="mt-3 rounded-md border border-white/10 bg-black/20 p-3 text-[11px] font-mono text-slate-300">
+                <p>
+                  generated_at:{" "}
+                  <span className="text-cyan-200">
+                    {realRecommendationsGeneratedAt ? formatDateTime(realRecommendationsGeneratedAt) : "-"}
+                  </span>
+                </p>
+                <p className="mt-1 text-slate-400">
+                  last_scan_symbols={realRecommendationsScannedCount ?? "-"} | short_term_buy={visibleRealRecommendations.length} |
+                  mail_signal_buy={visibleRealMailSignalRecommendations.length}
+                </p>
+                <p className="mt-1 text-[10px] text-slate-500">
+                  Pool ma dat chuan liquidity (tham khao bang tren, khong phai so ma scan): {liquidityEligibleTotal}
+                </p>
+                {formatShortTermScanDiagnostics(realRecommendationsScanDiagnostics) ? (
+                  <p className="mt-1 text-[10px] text-slate-400">
+                    {formatShortTermScanDiagnostics(realRecommendationsScanDiagnostics)}
+                  </p>
+                ) : null}
+                <div className="mt-2 rounded-md border border-white/10 bg-black/30 p-2">
+                  <p className="text-[10px] uppercase tracking-wide text-slate-400">Scan-only logs gan nhat (10)</p>
+                  {realRecommendationsRecentLogs.length === 0 ? (
+                    <p className="mt-1 text-[10px] text-slate-500">Chua co log scan-only.</p>
+                  ) : (
+                    <div className="mt-1 max-h-32 space-y-1 overflow-y-auto text-[10px] text-slate-300">
+                      {realRecommendationsRecentLogs.slice(0, 10).map((row, idx) => (
+                        <p key={`${row.redis_key}-${idx}`}>
+                          <span
+                            className={
+                              isWithinFreshWindow(row.generated_at ?? null, realRecommendationsFreshMinutes)
+                                ? "text-emerald-300"
+                                : "text-rose-300"
+                            }
+                          >
+                            {isWithinFreshWindow(row.generated_at ?? null, realRecommendationsFreshMinutes) ? "FRESH" : "STALE"}
+                          </span>{" "}
+                          |
+                          <span className="text-cyan-200">{row.generated_at ? formatDateTime(row.generated_at) : "-"}</span> | scanned=
+                          {Number(row.scanned || 0)} | short_term={Number(row.short_term_count ?? row.count ?? 0)} | mail=
+                          {Number(row.mail_signal_count ?? 0)}
+                        </p>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className="mt-2 grid gap-2 lg:grid-cols-2">
+                  <div className="rounded-md border border-white/10 bg-black/20 p-2">
+                    <p className="text-[10px] uppercase tracking-wide text-slate-400">Short-term recommendations</p>
+                    {visibleRealRecommendations.length === 0 ? (
+                      <p className="mt-1 text-[10px] text-slate-500">Chua co short-term BUY.</p>
+                    ) : (
+                      <div className="mt-1 max-h-28 space-y-1 overflow-y-auto text-[10px] text-slate-300">
+                        {visibleRealRecommendations.slice(0, 10).map((row, idx) => (
+                          <p key={`${row.symbol}-${idx}`}>
+                            <span className="text-cyan-200">{row.symbol}</span> | entry={formatPrice(row.entry)} | tp=
+                            {formatPrice(row.take_profit)} | sl={formatPrice(row.stop_loss)} | conf={row.confidence.toFixed(1)}%
+                          </p>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <div className="rounded-md border border-white/10 bg-black/20 p-2">
+                    <p className="text-[10px] uppercase tracking-wide text-slate-400">Mail-signal recommendations</p>
+                    {visibleRealMailSignalRecommendations.length === 0 ? (
+                      <p className="mt-1 text-[10px] text-slate-500">Chua co mail-signal BUY.</p>
+                    ) : (
+                      <div className="mt-1 max-h-28 space-y-1 overflow-y-auto text-[10px] text-slate-300">
+                        {visibleRealMailSignalRecommendations.slice(0, 10).map((row, idx) => (
+                          <p key={`mail-${row.symbol}-${idx}`}>
+                            <span className="text-violet-200">{row.symbol}</span> | entry={formatPrice(row.entry)} | tp=
+                            {formatPrice(row.take_profit)} | sl={formatPrice(row.stop_loss)} | conf={row.confidence.toFixed(1)}%
+                          </p>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="mt-3 grid gap-4 lg:grid-cols-2">
+                <div className="rounded-md border border-white/10 bg-black/20 p-3">
+                  <div className="flex flex-wrap items-end justify-between gap-2">
+                    <p className="text-xs font-semibold text-slate-300">Short-term automation logs (REAL)</p>
+                    <label className="flex flex-col gap-1 text-[11px] text-slate-400">
+                      Exchange scope
+                      <select
+                        className="rounded-md border border-white/15 bg-black/30 px-2 py-1 font-mono text-[11px] text-slate-100"
+                        value={realShortTermLogScopeFilter}
+                        onChange={(e) => setRealShortTermLogScopeFilter(e.target.value as "ANY" | ShortTermExchangeScope)}
+                      >
+                        <option value="ANY">ANY</option>
+                        <option value="ALL">ALL</option>
+                        <option value="HOSE">HOSE</option>
+                        <option value="HNX">HNX</option>
+                        <option value="UPCOM">UPCOM</option>
+                      </select>
+                    </label>
+                  </div>
+                  {realShortTermRuns.length === 0 ? (
+                    <p className="mt-2 text-[11px] text-slate-500">Chua co log auto-trading REAL.</p>
+                  ) : (
+                    <div className="mt-2 max-h-72 space-y-2 overflow-y-auto text-[11px] font-mono text-slate-300">
+                      {realShortTermRuns.map((run) => (
+                        <div key={run.id} className="border-b border-white/5 pb-2">
+                          <p>
+                            <span className="text-cyan-200">{formatDateTime(run.started_at)}</span> |{" "}
+                            <span className={automationRunStatusClass(run.run_status)}>{run.run_status}</span>
+                          </p>
+                          <p className="text-slate-400">
+                            scan={run.scanned} | buy={run.buy_candidates} | exec={run.executed} | err={run.errors}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className="rounded-md border border-white/10 bg-black/20 p-3">
+                  <p className="text-xs font-semibold text-slate-300">Mail entry logs (REAL)</p>
+                  {realMailSignalRunLogs.length === 0 ? (
+                    <p className="mt-2 text-[11px] text-slate-500">Chua co log mail entry REAL.</p>
+                  ) : (
+                    <div className="mt-2 max-h-72 space-y-2 overflow-y-auto text-[11px] font-mono text-slate-300">
+                      {realMailSignalRunLogs.map((run, idx) => (
+                        <div key={`${run.redis_key}-${idx}`} className="border-b border-white/5 pb-2">
+                          <p>
+                            <span className="text-cyan-200">{formatDateTime(run.ran_at)}</span> |{" "}
+                            <span className="text-violet-300">scanned={run.scanned}</span> |{" "}
+                            <span className="text-emerald-300">executed={run.executed.length}</span> |{" "}
+                            <span className="text-rose-300">skipped={run.skipped.length}</span>
+                          </p>
+                          <p className="text-slate-500">source={run.source_key || "-"}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </section>
 
         </div>
@@ -2500,7 +2719,10 @@ export function AutoTradingClient() {
           </div>
           <section className="glass-panel rounded-2xl p-6">
             <h3 className="text-sm font-semibold text-slate-200">Demo Logs</h3>
-            <p className="mt-1 text-xs text-slate-500">Log backend automation va mail entry cho demo session dang chon.</p>
+            <p className="mt-1 text-xs text-slate-500">
+              Log backend automation va mail entry cho demo session dang chon. Runs DEMO khong co session_id trong detail (scheduler
+              chua gan session) van duoc hien thi. Short-term chi chay khi slot grid trong phien VN va Auto DEMO bat.
+            </p>
             <div className="mt-3 grid gap-4 lg:grid-cols-2">
               <div className="rounded-md border border-white/10 bg-black/20 p-3">
                 <div className="flex flex-wrap items-end justify-between gap-2">

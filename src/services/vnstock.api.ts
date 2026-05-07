@@ -1,4 +1,4 @@
-import { getWithRetryCache, normalizeError, postWithRetryCache } from "@/services/http-client";
+import { API_REQUEST_TIMEOUT_MS, getWithRetryCache, normalizeError, postWithRetryCache } from "@/services/http-client";
 import type {
   AiAnalyzeSymbolResult,
   AiDataCompleteness,
@@ -94,7 +94,7 @@ export async function getAllSymbols(options?: { forceRefresh?: boolean }): Promi
     cacheTtlMs: 300_000,
     retries: 2,
     retryDelayMs: 800,
-    timeoutMs: 60_000,
+    timeoutMs: API_REQUEST_TIMEOUT_MS,
     skipCache: forceRefresh,
   };
 
@@ -196,7 +196,7 @@ export async function getSymbolsByGroup(group: string): Promise<string[]> {
     const response = await postWithRetryCache<Record<string, unknown>>(
       "/vnstock-api/listing/symbols-by-group",
       { method_kwargs: { group } },
-      { cacheTtlMs: 86_400_000, retries: 2, retryDelayMs: 800, timeoutMs: 20_000 },
+      { cacheTtlMs: 86_400_000, retries: 2, retryDelayMs: 800, timeoutMs: API_REQUEST_TIMEOUT_MS },
     );
     const payload = response?.data ?? response;
     return parseSymbolsGroupPayload(payload);
@@ -626,7 +626,7 @@ export async function analyzeSymbolWithAi(
         max_tokens: 5000,
         temperature: 0.2,
       },
-      { cacheTtlMs: 24 * 60 * 60 * 1000, retries: 0, timeoutMs: 600000 },
+      { cacheTtlMs: 24 * 60 * 60 * 1000, retries: 0, timeoutMs: API_REQUEST_TIMEOUT_MS },
     );
     const raw = response?.data ?? response;
     const item = pickObject<Record<string, unknown>>(raw);
@@ -663,7 +663,7 @@ export async function analyzeSymbolWithAiShortTechnical(
         max_tokens: 1200,
         temperature: 0.2,
       },
-      { cacheTtlMs: 24 * 60 * 60 * 1000, retries: 0, timeoutMs: 600000 },
+      { cacheTtlMs: 24 * 60 * 60 * 1000, retries: 0, timeoutMs: API_REQUEST_TIMEOUT_MS },
     );
     const raw = response?.data ?? response;
     const item = pickObject<Record<string, unknown>>(raw);
@@ -686,7 +686,11 @@ export async function getMarketScannerTop(
   try {
     const response = await getWithRetryCache<Record<string, unknown>>(
       `/market/scanner-top?days=${encodeURIComponent(days)}&top_n=${encodeURIComponent(topN)}&force_refresh=${forceRefresh ? "true" : "false"}&use_ai=${useAi ? "true" : "false"}&max_scan_per_exchange=20`,
-      { cacheTtlMs: forceRefresh ? 0 : 24 * 60 * 60 * 1000, retries: 0, timeoutMs: 120000 },
+      {
+        cacheTtlMs: forceRefresh ? 0 : 24 * 60 * 60 * 1000,
+        retries: 0,
+        timeoutMs: API_REQUEST_TIMEOUT_MS,
+      },
     );
     const raw = response?.data ?? response;
     const item = pickObject<Record<string, unknown>>(raw);

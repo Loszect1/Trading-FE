@@ -13,10 +13,11 @@ function resolveApiBaseUrl(): string {
 }
 
 const baseURL = resolveApiBaseUrl();
+export const API_REQUEST_TIMEOUT_MS = 30 * 60 * 1000;
 
 export const httpClient = axios.create({
   baseURL,
-  timeout: 900_000,
+  timeout: API_REQUEST_TIMEOUT_MS,
   headers: {
     "Content-Type": "application/json",
   },
