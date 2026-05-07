@@ -24,20 +24,20 @@ export function SiteNav() {
   };
 
   return (
-    <header className="sticky top-0 z-40 border-b border-white/10 bg-[#04070d]/85 backdrop-blur">
-      <div className="mx-auto flex h-14 w-full max-w-6xl items-center justify-between px-4">
-        <Link href="/" className="text-sm font-semibold tracking-[0.18em] text-cyan-200">
+    <header className="sticky top-0 z-40 border-b border-white/10 bg-[#070809]/90 backdrop-blur">
+      <div className="mx-auto flex h-14 w-full max-w-6xl items-center gap-4 px-4">
+        <Link href="/" className="shrink-0 text-sm font-semibold text-cyan-100">
           {UI_TEXT.appName}
         </Link>
-        <nav className="flex items-center gap-4 text-sm text-slate-300">
+        <nav className="no-scrollbar flex min-w-0 flex-1 items-center justify-start gap-1.5 overflow-x-auto text-sm text-slate-300 sm:justify-end">
           {items.map((item) => (
             <Link
               key={item.href}
               href={item.href}
-              className={`rounded-md border px-2 py-1 font-medium transition ${
+              className={`shrink-0 rounded-md border px-2.5 py-1.5 font-medium transition ${
                 isActive(item.href)
-                  ? "border-cyan-300/70 bg-cyan-300/20 text-cyan-100 shadow-[0_0_0_1px_rgba(103,232,249,0.3)]"
-                  : "border-transparent hover:border-cyan-300/20 hover:bg-cyan-300/10 hover:text-cyan-100"
+                  ? "border-cyan-300/60 bg-cyan-300/[0.16] text-cyan-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
+                  : "border-white/10 bg-white/[0.02] hover:border-cyan-300/25 hover:bg-cyan-300/10 hover:text-cyan-100"
               }`}
             >
               {item.label}

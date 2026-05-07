@@ -143,6 +143,9 @@ export interface ShortTermScanDiagnostics {
   skipped_entry_gate?: number;
   skipped_experience_cooldown?: number;
   skipped_dynamic_buy_floor?: number;
+  price_history_cache_hits?: number;
+  price_history_vnstock_calls?: number;
+  price_history_missing?: number;
   dynamic_buy_composite_floor?: number;
   buy_signals_written?: number;
 }

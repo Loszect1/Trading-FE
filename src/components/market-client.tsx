@@ -191,10 +191,15 @@ export function MarketClient({ initialSymbols }: MarketClientProps) {
   return (
     <section className="space-y-4">
       <div className="glass-panel rounded-xl p-4">
-        <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-slate-100">{UI_TEXT.market.scanner.title}</h2>
-          <div className="flex items-center gap-2">
-            <div className="flex items-center gap-2">
+        <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <h2 className="text-sm font-semibold text-slate-100">{UI_TEXT.market.scanner.title}</h2>
+            <p className="mt-1 text-xs text-slate-500">
+              {scanner?.as_of ? `${UI_TEXT.market.scanner.asOfPrefix} ${scanner.as_of}` : UI_TEXT.market.scanner.scanningMarket}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex h-8 items-center gap-2 rounded-md border border-white/10 bg-black/20 px-2">
               <label htmlFor="scanner-days" className="text-xs text-slate-300">
                 {UI_TEXT.market.scanner.daysLabel}
               </label>
@@ -216,15 +221,10 @@ export function MarketClient({ initialSymbols }: MarketClientProps) {
                   }
                   setScannerDays(Math.max(2, Math.min(365, parsed)));
                 }}
-                className="h-7 w-16 rounded-md border border-slate-500/40 bg-slate-950/75 px-2 text-xs text-slate-100 outline-none transition focus:border-cyan-300/70 focus:ring-2 focus:ring-cyan-400/25"
+                className="h-6 w-14 rounded-md border border-slate-500/40 bg-black/40 px-2 text-xs text-slate-100 outline-none transition focus:border-cyan-300/70 focus:ring-2 focus:ring-cyan-400/25"
               />
             </div>
-            {scanner?.as_of ? (
-              <p className="text-xs text-slate-400">
-                {UI_TEXT.market.scanner.asOfPrefix} {scanner.as_of}
-              </p>
-            ) : null}
-            <p className="text-xs text-slate-400">
+            <p className="rounded-md border border-white/10 bg-black/20 px-2 py-1.5 text-xs text-slate-400">
               {UI_TEXT.market.scanner.modeLabel}{" "}
               {scannerMode === "ai" ? UI_TEXT.market.scanner.modeAi : UI_TEXT.market.scanner.modeNormal}
             </p>
@@ -232,7 +232,7 @@ export function MarketClient({ initialSymbols }: MarketClientProps) {
               type="button"
               onClick={() => void loadScanner(true, false)}
               disabled={scannerLoading}
-              className="rounded-md border border-cyan-300/45 bg-cyan-300/10 px-3 py-1 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-300/20 disabled:cursor-not-allowed disabled:opacity-50"
+              className="rounded-md border border-cyan-300/45 bg-cyan-300/10 px-3 py-1.5 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-300/20 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {scannerLoading ? UI_TEXT.market.scanner.scanning : UI_TEXT.market.scanner.scanNow}
             </button>
@@ -240,19 +240,26 @@ export function MarketClient({ initialSymbols }: MarketClientProps) {
               type="button"
               onClick={() => void loadScanner(true, true)}
               disabled={scannerLoading}
-              className="rounded-md border border-purple-300/45 bg-purple-300/10 px-3 py-1 text-xs font-semibold text-purple-100 transition hover:bg-purple-300/20 disabled:cursor-not-allowed disabled:opacity-50"
+              className="rounded-md border border-purple-300/45 bg-purple-300/10 px-3 py-1.5 text-xs font-semibold text-purple-100 transition hover:bg-purple-300/20 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {scannerLoading ? UI_TEXT.market.scanner.scanning : UI_TEXT.market.scanner.scanWithAi}
             </button>
           </div>
         </div>
         {scannerLoading ? (
-          <p className="text-xs text-slate-400">{UI_TEXT.market.scanner.scanningMarket}</p>
+          <div className="grid gap-3 md:grid-cols-3">
+            {(["HOSE", "HNX", "UPCOM"] as const).map((exchange) => (
+              <div key={exchange} className="rounded-lg border border-white/10 bg-black/20 p-3">
+                <p className="text-xs font-semibold text-cyan-200">{exchange}</p>
+                <div className="mt-3 h-14 animate-pulse rounded-md bg-white/[0.08]" />
+              </div>
+            ))}
+          </div>
         ) : (
           <div className="grid gap-3 md:grid-cols-3">
             {(["HOSE", "HNX", "UPCOM"] as const).map((exchange) => (
               <div key={exchange} className="rounded-lg border border-white/10 bg-slate-950/45 p-3">
-                <p className="text-xs font-semibold tracking-wide text-cyan-200">{exchange}</p>
+                <p className="text-xs font-semibold text-cyan-200">{exchange}</p>
                 {scanner?.by_exchange?.[exchange]?.length ? (
                   <div className="mt-2 space-y-2">
                     {scanner.by_exchange[exchange].map((item, index) => (
@@ -298,48 +305,52 @@ export function MarketClient({ initialSymbols }: MarketClientProps) {
           </div>
         )}
       </div>
-      <div className="flex flex-wrap items-center justify-end">
-        <button
-          type="button"
-          onClick={() => void refreshSymbolListFromServer()}
-          disabled={listRefreshing}
-          className="rounded-md border border-cyan-300/45 bg-cyan-300/10 px-3 py-2 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-300/20 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {listRefreshing ? UI_TEXT.market.refreshFromServerLoading : UI_TEXT.market.refreshFromServer}
-        </button>
-      </div>
-      <div className="glass-panel grid gap-3 rounded-xl p-4 sm:grid-cols-3">
-        <input
-          value={inputValue}
-          onChange={(event) => setInputValue(event.target.value)}
-          placeholder={UI_TEXT.market.searchPlaceholder}
-          className="h-10 rounded-md border border-slate-500/40 bg-slate-950/75 px-3 text-sm text-slate-100 placeholder:text-slate-400 outline-none transition focus:border-cyan-300/70 focus:ring-2 focus:ring-cyan-400/25"
-        />
-        <select
-          value={exchange}
-          onChange={(event) => {
-            setExchange(event.target.value as BoardFilter);
-            setPage(1);
-          }}
-          className="h-10 rounded-md border border-slate-500/40 bg-slate-950/75 px-3 text-sm text-slate-100 outline-none transition focus:border-cyan-300/70 focus:ring-2 focus:ring-cyan-400/25"
-        >
-          {BOARD_FILTERS.map((item) => (
-            <option key={item} value={item}>
-              {item === "ALL" ? UI_TEXT.market.exchangeAll : item}
-            </option>
-          ))}
-        </select>
-        <select
-          value={sortBy}
-          onChange={(event) => {
-            setSortBy(event.target.value as SortBy);
-            setPage(1);
-          }}
-          className="h-10 rounded-md border border-slate-500/40 bg-slate-950/75 px-3 text-sm text-slate-100 outline-none transition focus:border-cyan-300/70 focus:ring-2 focus:ring-cyan-400/25"
-        >
-          <option value="symbol-asc">{UI_TEXT.market.sortAz}</option>
-          <option value="symbol-desc">{UI_TEXT.market.sortZa}</option>
-        </select>
+      <div className="glass-panel rounded-xl p-4">
+        <div className="grid gap-3 lg:grid-cols-[1fr_11rem_14rem_auto]">
+          <input
+            value={inputValue}
+            onChange={(event) => setInputValue(event.target.value)}
+            placeholder={UI_TEXT.market.searchPlaceholder}
+            className="h-10 rounded-md border border-slate-500/40 bg-black/35 px-3 text-sm text-slate-100 placeholder:text-slate-500 outline-none transition focus:border-cyan-300/70 focus:ring-2 focus:ring-cyan-400/25"
+          />
+          <select
+            value={exchange}
+            onChange={(event) => {
+              setExchange(event.target.value as BoardFilter);
+              setPage(1);
+            }}
+            className="h-10 rounded-md border border-slate-500/40 bg-black/35 px-3 text-sm text-slate-100 outline-none transition focus:border-cyan-300/70 focus:ring-2 focus:ring-cyan-400/25"
+          >
+            {BOARD_FILTERS.map((item) => (
+              <option key={item} value={item}>
+                {item === "ALL" ? UI_TEXT.market.exchangeAll : item}
+              </option>
+            ))}
+          </select>
+          <select
+            value={sortBy}
+            onChange={(event) => {
+              setSortBy(event.target.value as SortBy);
+              setPage(1);
+            }}
+            className="h-10 rounded-md border border-slate-500/40 bg-black/35 px-3 text-sm text-slate-100 outline-none transition focus:border-cyan-300/70 focus:ring-2 focus:ring-cyan-400/25"
+          >
+            <option value="symbol-asc">{UI_TEXT.market.sortAz}</option>
+            <option value="symbol-desc">{UI_TEXT.market.sortZa}</option>
+          </select>
+          <button
+            type="button"
+            onClick={() => void refreshSymbolListFromServer()}
+            disabled={listRefreshing}
+            className="h-10 rounded-md border border-cyan-300/45 bg-cyan-300/10 px-3 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-300/20 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {listRefreshing ? UI_TEXT.market.refreshFromServerLoading : UI_TEXT.market.refreshFromServer}
+          </button>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-300">
+          <p>{UI_TEXT.market.result(filteredSymbols.length)}</p>
+          <p>{UI_TEXT.market.showing(from, to)}</p>
+        </div>
       </div>
       {exchange === "VN30" && vn30LoadState === "loading" ? (
         <p className="text-xs text-slate-400">{UI_TEXT.market.vn30ListLoading}</p>
@@ -347,13 +358,9 @@ export function MarketClient({ initialSymbols }: MarketClientProps) {
       {exchange === "VN30" && vn30LoadState === "error" ? (
         <p className="text-xs text-amber-200/90">{UI_TEXT.market.vn30ListError}</p>
       ) : null}
-      <div className="flex items-center justify-between text-xs text-slate-300">
-        <p>{UI_TEXT.market.result(filteredSymbols.length)}</p>
-        <p>{UI_TEXT.market.showing(from, to)}</p>
-      </div>
       {inputValue !== keyword ? <p className="text-xs text-cyan-200">{UI_TEXT.market.searching}</p> : null}
       <MarketTable symbols={pagedSymbols} />
-      <div className="flex items-center justify-end gap-2">
+      <div className="flex flex-wrap items-center justify-end gap-2">
         <button
           type="button"
           onClick={() => setPage((prev) => Math.max(1, prev - 1))}

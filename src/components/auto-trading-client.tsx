@@ -107,6 +107,9 @@ function formatShortTermScanDiagnostics(d: ShortTermScanDiagnostics | null | und
   add("entry_gate", d.skipped_entry_gate);
   add("cooldown", d.skipped_experience_cooldown);
   add("dyn_buy_floor", d.skipped_dynamic_buy_floor);
+  add("db_cache", d.price_history_cache_hits);
+  add("vnstock_calls", d.price_history_vnstock_calls);
+  add("price_missing", d.price_history_missing);
   if (typeof d.dynamic_buy_composite_floor === "number" && Number.isFinite(d.dynamic_buy_composite_floor)) {
     parts.push(`composite_buy_floor=${d.dynamic_buy_composite_floor}`);
   }
@@ -1415,11 +1418,9 @@ export function AutoTradingClient() {
         }
       }
 
-      // Production scheduler follows master toggle.
-      const desiredBackendEnabled = realScanOnlyScheduleEnabled;
-      if (schedulerStatus.enabled !== desiredBackendEnabled) {
-        await handleToggleScheduler();
-      }
+      // Production scheduler is controlled by the Auto trading button only.
+      // Do not reuse the scan-only toggle state here; Scan only must never
+      // turn on REAL auto order execution.
     };
 
     void sync();
@@ -1525,7 +1526,7 @@ export function AutoTradingClient() {
           {UI_TEXT.autoTrading.tabDemo}
         </button>
         {accountTab === "demo" ? (
-          <div className="ml-auto flex items-center gap-2">
+          <div className="flex w-full flex-wrap items-center gap-2 sm:ml-auto sm:w-auto">
             <span className="text-xs text-slate-400">
               Auto {schedulerAccountMode}: {schedulerStatus?.enabled ? "ON" : "OFF"} /{" "}
               {schedulerStatus?.running ? "RUNNING" : "STOPPED"}
@@ -1577,7 +1578,7 @@ export function AutoTradingClient() {
                 </button>
               </div>
 
-              <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center justify-start gap-3 sm:justify-between">
                 {realAutomationMode === "SCAN_ONLY" ? (
                   <>
                     <span className="text-xs text-slate-400">
@@ -1587,7 +1588,7 @@ export function AutoTradingClient() {
                       type="button"
                       onClick={() => setRealScanOnlyScheduleEnabled((v) => !v)}
                       disabled={schedulerBusy}
-                      className="rounded-md border border-cyan-300/40 px-3 py-2 text-xs font-semibold text-cyan-100 disabled:opacity-50"
+                       className="rounded-md border border-cyan-300/40 px-3 py-2 text-xs font-semibold text-cyan-100 disabled:opacity-50"
                     >
                       {realScanOnlyScheduleEnabled ? "Tat scan" : "Bat scan"}
                     </button>
@@ -1595,16 +1596,16 @@ export function AutoTradingClient() {
                 ) : (
                   <>
                     <span className="text-xs text-slate-400">
-                      Auto REAL backend: {schedulerStatus?.enabled ? "ON" : "OFF"} /{" "}
+                      Auto trading REAL: {schedulerStatus?.enabled ? "ON" : "OFF"} /{" "}
                       {schedulerStatus?.running ? "RUNNING" : "STOPPED"}
                     </span>
                     <button
                       type="button"
-                      onClick={() => setRealScanOnlyScheduleEnabled((v) => !v)}
-                      disabled={schedulerBusy}
+                      onClick={() => void handleToggleScheduler()}
+                      disabled={schedulerBusy || !schedulerStatus}
                       className="rounded-md border border-cyan-300/40 px-3 py-2 text-xs font-semibold text-cyan-100 disabled:opacity-50"
                     >
-                      {realScanOnlyScheduleEnabled ? "Tat Auto" : "Bat Auto"}
+                      {schedulerBusy ? "Dang toggle..." : schedulerStatus?.enabled ? "Tat Auto" : "Bat Auto"}
                     </button>
                   </>
                 )}

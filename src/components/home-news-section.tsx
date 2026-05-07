@@ -75,13 +75,13 @@ export function HomeNewsSection() {
   }
 
   return (
-    <section className="glass-panel rounded-2xl p-6 md:p-8">
+    <section className="glass-panel rounded-xl p-5">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <p className="inline-flex rounded-full border border-cyan-300/35 bg-cyan-300/10 px-3 py-1 text-xs font-medium tracking-[0.12em] text-cyan-100">
+          <p className="inline-flex rounded-md border border-cyan-300/35 bg-cyan-300/10 px-2.5 py-1 text-xs font-medium uppercase text-cyan-100">
             {UI_TEXT.home.news.badge}
           </p>
-          <h2 className="mt-3 text-2xl font-semibold text-slate-100">{UI_TEXT.home.news.title}</h2>
+          <h2 className="mt-3 text-xl font-semibold text-slate-100">{UI_TEXT.home.news.title}</h2>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-400">
             {UI_TEXT.home.news.description}
           </p>
@@ -126,7 +126,7 @@ export function HomeNewsSection() {
           disabled={loading}
           aria-label={UI_TEXT.home.news.refreshAria}
           aria-busy={refreshing}
-          className="shrink-0 rounded-md border border-white/20 px-3 py-1.5 text-xs font-semibold text-slate-100 transition hover:bg-white/8 disabled:cursor-not-allowed disabled:opacity-50"
+          className="shrink-0 rounded-md border border-white/20 px-3 py-1.5 text-xs font-semibold text-slate-100 transition hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-50"
         >
           {refreshing ? UI_TEXT.home.news.refreshLoading : UI_TEXT.home.news.refresh}
         </button>
@@ -159,7 +159,7 @@ export function HomeNewsSection() {
                     {item.source_name ? <span>{item.source_name}</span> : null}
                     {item.published_at ? <span>{item.published_at}</span> : null}
                     {item.item_origin ? (
-                      <span className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-slate-500">
+                      <span className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[10px] uppercase text-slate-500">
                         {item.item_origin}
                       </span>
                     ) : null}
