@@ -4,6 +4,9 @@ import { API_REQUEST_TIMEOUT_MS, httpClient, normalizeError } from "@/services/h
 
 /** DNSE calls can exceed default API timeout (login, OTP, place order). */
 const DNSE_REQUEST_TIMEOUT_MS = API_REQUEST_TIMEOUT_MS;
+const DNSE_SESSION_EXPIRED_ERROR_CODE = "dnse_session_expired";
+const DNSE_SESSION_EXPIRED_MESSAGE = "Phiên DNSE đã hết hạn. Vui lòng đăng nhập lại.";
+const DNSE_SESSION_EXPIRED_EVENT = "vnstock:dnse-session-expired";
 
 function applyDnseSessionAuth<T extends Record<string, unknown>>(payload: T): T {
   const token = getDnseAccessToken()?.trim();
@@ -51,6 +54,33 @@ export async function dnseAuthLogin(username?: string, password?: string): Promi
 
 export function dnseAuthLogout(): void {
   clearDnseSession();
+}
+
+function clearExpiredDnseSession(): never {
+  clearDnseSession();
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new Event(DNSE_SESSION_EXPIRED_EVENT));
+  }
+  throw {
+    message: DNSE_SESSION_EXPIRED_MESSAGE,
+    errorCode: DNSE_SESSION_EXPIRED_ERROR_CODE,
+  };
+}
+
+function requireDnseResponseData(responseBody: Record<string, unknown>): Record<string, unknown> {
+  if (responseBody.data === null) {
+    clearExpiredDnseSession();
+  }
+  return responseBody;
+}
+
+export function isDnseSessionExpiredError(error: unknown): boolean {
+  return Boolean(
+    error &&
+      typeof error === "object" &&
+      "errorCode" in error &&
+      (error as { errorCode?: unknown }).errorCode === DNSE_SESSION_EXPIRED_ERROR_CODE,
+  );
 }
 
 export interface DnseDefaultsData {
@@ -129,8 +159,11 @@ export async function fetchDnseAccount(payload: DnseEmailOtpPayload): Promise<Re
     const response = await httpClient.post<Record<string, unknown>>("/dnse/account", body, {
       timeout: DNSE_REQUEST_TIMEOUT_MS,
     });
-    return response.data;
+    return requireDnseResponseData(response.data);
   } catch (error) {
+    if (isDnseSessionExpiredError(error)) {
+      throw error;
+    }
     throw normalizeError(error);
   }
 }
@@ -141,8 +174,11 @@ export async function fetchDnseSubAccounts(payload: DnseEmailOtpPayload): Promis
     const response = await httpClient.post<Record<string, unknown>>("/dnse/sub-accounts", body, {
       timeout: DNSE_REQUEST_TIMEOUT_MS,
     });
-    return response.data;
+    return requireDnseResponseData(response.data);
   } catch (error) {
+    if (isDnseSessionExpiredError(error)) {
+      throw error;
+    }
     throw normalizeError(error);
   }
 }
@@ -155,8 +191,11 @@ export async function fetchDnseAccountBalance(
     const response = await httpClient.post<Record<string, unknown>>("/dnse/account-balance", body, {
       timeout: DNSE_REQUEST_TIMEOUT_MS,
     });
-    return response.data;
+    return requireDnseResponseData(response.data);
   } catch (error) {
+    if (isDnseSessionExpiredError(error)) {
+      throw error;
+    }
     throw normalizeError(error);
   }
 }

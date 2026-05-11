@@ -1,5 +1,6 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import {
@@ -26,6 +27,7 @@ import {
   fetchDnseDefaults,
   fetchDnseSubAccounts,
   isAppError,
+  isDnseSessionExpiredError,
   pickSubAccountNumbers,
 } from "@/services/dnse.api";
 import {
@@ -296,7 +298,21 @@ function extractDnseAccountNameFromRows(rows: Record<string, unknown>[]): string
 }
 
 function extractDnseDepositedAmountFromRows(rows: Record<string, unknown>[]): { value: number; sourceKey: string } | null {
-  const depositKeys = ["initialBalance", "initial_balance"];
+  const depositKeys = [
+    "initialBalance",
+    "initial_balance",
+    "depositedAmount",
+    "deposited_amount",
+    "depositAmount",
+    "deposit_amount",
+    "totalDeposit",
+    "total_deposit",
+    "netDeposit",
+    "net_deposit",
+    "principal",
+    "principalAmount",
+    "principal_amount",
+  ];
   for (const row of rows) {
     for (const key of depositKeys) {
       const n = parseNumberCandidate(row[key]);
@@ -352,6 +368,235 @@ function extractDnseHoldingsFromRows(rows: Record<string, unknown>[]): DnseHoldi
 const OVERVIEW_DONUT_COLORS = ["#34d399", "#60a5fa"];
 const HOLDINGS_BAR_COLOR = "#a78bfa";
 
+function RealMetricCard({
+  label,
+  value,
+  tone = "slate",
+}: {
+  label: string;
+  value: string | number;
+  tone?: "cyan" | "emerald" | "amber" | "rose" | "slate";
+}) {
+  const toneClass = {
+    cyan: "border-cyan-300/25 bg-cyan-300/10 text-cyan-100",
+    emerald: "border-emerald-300/25 bg-emerald-300/10 text-emerald-100",
+    amber: "border-amber-300/25 bg-amber-300/10 text-amber-100",
+    rose: "border-rose-300/25 bg-rose-300/10 text-rose-100",
+    slate: "border-white/10 bg-black/20 text-slate-100",
+  }[tone];
+
+  return (
+    <div className={`rounded-md border p-3 ${toneClass}`}>
+      <p className="text-[11px] uppercase text-slate-500">{label}</p>
+      <p className="mt-1 text-base font-semibold">{value}</p>
+    </div>
+  );
+}
+
+function formatConfidencePercent(value: number | null | undefined): string {
+  const raw = Number(value ?? 0);
+  if (!Number.isFinite(raw)) {
+    return "-";
+  }
+  const pct = raw <= 1 ? raw * 100 : raw;
+  return `${pct.toFixed(pct >= 10 ? 0 : 1)}%`;
+}
+
+function RealSectionHeader({
+  title,
+  meta,
+  action,
+}: {
+  title: string;
+  meta?: string;
+  action?: ReactNode;
+}) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-3">
+      <div>
+        <h3 className="text-sm font-semibold text-slate-100">{title}</h3>
+        {meta ? <p className="mt-1 text-xs text-slate-500">{meta}</p> : null}
+      </div>
+      {action ? <div className="flex flex-wrap items-center gap-2">{action}</div> : null}
+    </div>
+  );
+}
+
+function RealStatusPill({ label, active }: { label: string; active: boolean }) {
+  return (
+    <span
+      className={`rounded-md border px-2 py-1 text-[11px] font-semibold ${
+        active
+          ? "border-emerald-300/40 bg-emerald-300/10 text-emerald-100"
+          : "border-white/10 bg-black/20 text-slate-400"
+      }`}
+    >
+      {label}: {active ? "ON" : "OFF"}
+    </span>
+  );
+}
+
+function LiquidityCachePanel({
+  rows,
+  total,
+  error,
+  busy,
+  onRunNow,
+  compact = false,
+}: {
+  rows: LiquidityEligibleCacheRow[];
+  total: number;
+  error: string;
+  busy: boolean;
+  onRunNow: () => void;
+  compact?: boolean;
+}) {
+  return (
+    <section className="glass-panel rounded-xl p-5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-200">Liquidity Cache</h3>
+          <p className="mt-1 text-xs text-slate-500">eligible_spike=true + eligible_liquidity=true</p>
+        </div>
+        <button
+          type="button"
+          onClick={onRunNow}
+          disabled={busy}
+          className="rounded-md border border-cyan-300/40 px-3 py-1.5 text-[11px] font-semibold text-cyan-100 disabled:opacity-50"
+        >
+          {busy ? "Running..." : "Run now"}
+        </button>
+      </div>
+      {error ? <p className="mt-2 text-xs text-rose-300">{error}</p> : null}
+      <div className="mt-3 grid gap-3 lg:grid-cols-[10rem_1fr]">
+        <div className="rounded-md border border-cyan-300/20 bg-cyan-300/5 p-3">
+          <p className="text-[11px] uppercase tracking-wide text-cyan-100/75">Qualified symbols</p>
+          <p className="mt-1 text-2xl font-semibold text-cyan-100">{total}</p>
+        </div>
+        {rows.length === 0 ? (
+          <div className="rounded-md border border-dashed border-white/10 bg-white/[0.03] p-4 text-xs text-slate-500">
+            Chua co ma dat du ca 2 dieu kien trong Redis cache.
+          </div>
+        ) : (
+          <div className={`overflow-y-auto overflow-x-auto rounded-md border border-white/10 ${compact ? "max-h-56" : "max-h-80"}`}>
+            <table className="w-full min-w-[640px] text-left text-xs text-slate-200">
+              <thead className="border-b border-white/10 uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th className="py-2.5 pr-4 pl-3 whitespace-nowrap">Symbol</th>
+                  <th className="py-2.5 pr-4 whitespace-nowrap">Exchange</th>
+                  <th className="py-2.5 pr-4 whitespace-nowrap">Spike</th>
+                  <th className="py-2.5 pr-4 whitespace-nowrap">Baseline vol</th>
+                  <th className="py-2.5 pr-3 whitespace-nowrap">Latest vol</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row) => (
+                  <tr key={row.redis_key} className="border-b border-white/5 align-top">
+                    <td className="py-2 pr-3 pl-3 font-mono text-cyan-200">{row.symbol}</td>
+                    <td className="py-2 pr-3 text-slate-300">{row.exchange}</td>
+                    <td className="py-2 pr-3 text-emerald-300">{Number(row.spike_ratio || 0).toFixed(2)}x</td>
+                    <td className="py-2 pr-3 text-slate-100">{formatVnd(Number(row.baseline_vol || 0))}</td>
+                    <td className="py-2 pr-3 text-slate-100">{formatVnd(Number(row.latest_vol || 0))}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function MailSignalsPanel({
+  mailSignals,
+  pickCount,
+  error,
+  busy,
+  onRunNow,
+  compact = false,
+}: {
+  mailSignals: MailSignalsData | null;
+  pickCount: number;
+  error: string;
+  busy: boolean;
+  onRunNow: () => void;
+  compact?: boolean;
+}) {
+  return (
+    <section className="glass-panel rounded-xl p-5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-200">Mail Signals</h3>
+          <p className="mt-1 text-xs text-slate-500">{pickCount} picks from latest parsed mail cache</p>
+        </div>
+        <button
+          type="button"
+          onClick={onRunNow}
+          disabled={busy}
+          className="rounded-md border border-cyan-300/40 px-3 py-1.5 text-[11px] font-semibold text-cyan-100 disabled:opacity-50"
+        >
+          {busy ? "Running..." : "Run now"}
+        </button>
+      </div>
+      {error ? <p className="mt-2 text-xs text-rose-300">{error}</p> : null}
+      {!mailSignals ? (
+        <p className="mt-3 text-xs text-slate-500">Chua co du lieu mail signal.</p>
+      ) : (
+        <div className="mt-3 space-y-3 text-xs text-slate-300">
+          <div className="rounded-md border border-white/10 bg-black/20 p-2 text-[11px] text-slate-400">
+            <p>
+              source={mailSignals.redis_key || "-"} | parsed_picks={pickCount} | mail_count=
+              {Number(mailSignals.mail_count || 0)} | generated_at=
+              {mailSignals.generated_at ? formatDateTime(mailSignals.generated_at) : "-"}
+            </p>
+            {mailSignals.latest_empty_redis_key ? (
+              <p className="mt-1 text-amber-300">
+                Today cache empty: {mailSignals.latest_empty_redis_key}
+                {mailSignals.latest_empty_note ? ` (${mailSignals.latest_empty_note})` : ""}
+              </p>
+            ) : null}
+          </div>
+          {mailSignals.items.length === 0 ? (
+            <p className="text-slate-500">
+              {mailSignals.note === "no_today_mail"
+                ? "Khong tim thay mail signal trong ngay hien tai."
+                : "Khong co ma mua hop le tu mail gan nhat."}
+            </p>
+          ) : (
+            <div className={`overflow-x-auto ${compact ? "max-h-56 overflow-y-auto" : ""}`}>
+              <table className="w-full min-w-[700px] text-left text-xs text-slate-200">
+                <thead className="border-b border-white/10 uppercase tracking-wide text-slate-500">
+                  <tr>
+                    <th className="py-2.5 pr-4 whitespace-nowrap">Symbol</th>
+                    <th className="py-2.5 pr-4 whitespace-nowrap">Entry</th>
+                    <th className="py-2.5 pr-4 whitespace-nowrap">Take profit</th>
+                    <th className="py-2.5 pr-4 whitespace-nowrap">Stop loss</th>
+                    <th className="py-2.5 pr-4 whitespace-nowrap">Confidence</th>
+                    <th className="py-2.5 whitespace-nowrap">Reason</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {mailSignals.items.map((item, idx) => (
+                    <tr key={`${item.symbol}-${idx}`} className="border-b border-white/5 align-top">
+                      <td className="py-2 pr-3 font-mono text-cyan-200">{item.symbol}</td>
+                      <td className="py-2 pr-3 text-slate-100">{formatPrice(item.entry)}</td>
+                      <td className="py-2 pr-3 text-emerald-300">{formatPrice(item.take_profit)}</td>
+                      <td className="py-2 pr-3 text-rose-300">{formatPrice(item.stop_loss)}</td>
+                      <td className="py-2 pr-3 text-amber-300">{formatConfidencePercent(item.confidence)}</td>
+                      <td className="py-2">{item.reason || "-"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function AutoTradingClient() {
   const { showToast } = useToast();
   const realScanOnlySchedulerToggleBusyRef = useRef(false);
@@ -383,6 +628,7 @@ export function AutoTradingClient() {
   const [liquidityRefreshBusy, setLiquidityRefreshBusy] = useState(false);
   const [automationLogScopeFilter, setAutomationLogScopeFilter] = useState<"ANY" | ShortTermExchangeScope>("ANY");
   const [realRecommendations, setRealRecommendations] = useState<RealRecommendationRow[]>([]);
+  const [realRejectedRecommendations, setRealRejectedRecommendations] = useState<RealRecommendationRow[]>([]);
   const [realRecommendationsGeneratedAt, setRealRecommendationsGeneratedAt] = useState<string | null>(null);
   const [realRecommendationsScannedCount, setRealRecommendationsScannedCount] = useState<number | null>(null);
   const [realRecommendationsScanDiagnostics, setRealRecommendationsScanDiagnostics] = useState<ShortTermScanDiagnostics | null>(
@@ -508,6 +754,18 @@ export function AutoTradingClient() {
     ].filter((block) => block.sessionId && block.groups.length > 0);
   }, [automationLogScopeFilter, automationRuns, demoSessionId, schedulerAccountMode]);
 
+  const demoAutomationLogRows = useMemo(() => {
+    return automationRunLogGroups.flatMap((sessionBlock) =>
+      sessionBlock.groups.flatMap((group) =>
+        group.runs.map((run) => ({
+          run,
+          scope: group.bucket,
+          sessionId: sessionBlock.sessionId,
+        })),
+      ),
+    );
+  }, [automationRunLogGroups]);
+
   const realShortTermRuns = useMemo(() => {
     const rows = automationRuns
       .filter((run) => {
@@ -558,10 +816,39 @@ export function AutoTradingClient() {
     () => (realRecommendationsFresh ? realRecommendations : []),
     [realRecommendations, realRecommendationsFresh],
   );
+  const visibleRealRejectedRecommendations = useMemo(
+    () => (realRecommendationsFresh ? realRejectedRecommendations : []),
+    [realRejectedRecommendations, realRecommendationsFresh],
+  );
+  const realRejectedTopReasons = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const row of visibleRealRejectedRecommendations) {
+      const reason = String(row.risk_reason || "unknown");
+      counts.set(reason, (counts.get(reason) || 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6);
+  }, [visibleRealRejectedRecommendations]);
+  const mailSignalPickCount = useMemo(() => Number(mailSignals?.items?.length ?? 0), [mailSignals]);
+  const mailSignalsGeneratedAt = mailSignals?.generated_at ?? null;
+  const mailSignalsSourceLabel = mailSignals?.source
+    ? `${mailSignals.source}${mailSignalsGeneratedAt ? ` | ${formatDateTime(mailSignalsGeneratedAt)}` : ""}`
+    : "No mail cache";
   const visibleRealMailSignalRecommendations = useMemo(
     () => (realRecommendationsFresh ? realMailSignalRecommendations : []),
     [realMailSignalRecommendations, realRecommendationsFresh],
   );
+  const dnsePortfolioMarketValue = useMemo(() => {
+    return (dnseAccountSummary?.holdings ?? []).reduce((total, row) => {
+      const price = Number(row.marketPrice ?? row.averagePrice ?? 0);
+      const quantity = Number(row.quantity ?? 0);
+      if (!Number.isFinite(price) || !Number.isFinite(quantity) || price <= 0 || quantity <= 0) {
+        return total;
+      }
+      return total + price * quantity;
+    }, 0);
+  }, [dnseAccountSummary?.holdings]);
 
   const credsPayload = useCallback(() => {
     const u = username.trim();
@@ -833,6 +1120,7 @@ export function AutoTradingClient() {
     try {
       const [response, recent] = await Promise.all([fetchRealRecommendationsLatest(), fetchRealRecommendationsRecent(10)]);
       setRealRecommendations(response.recommendations ?? []);
+      setRealRejectedRecommendations(response.rejected_recommendations ?? []);
       setRealMailSignalRecommendations(response.mail_signal_recommendations ?? []);
       setRealRecommendationsGeneratedAt(response.generated_at ?? null);
       const scanned = Number(response.scanned ?? 0);
@@ -842,6 +1130,7 @@ export function AutoTradingClient() {
       setRealRecommendationsError("");
     } catch (error) {
       setRealRecommendations([]);
+      setRealRejectedRecommendations([]);
       setRealMailSignalRecommendations([]);
       setRealRecommendationsGeneratedAt(null);
       setRealRecommendationsScannedCount(null);
@@ -999,8 +1288,10 @@ export function AutoTradingClient() {
       const response = await postRealRecommendationsScan({
         exchange_scope: "ALL",
         limit_symbols: 0,
+        real_account_available_cash_vnd: Number(dnseAccountSummary?.tradableCash ?? 0) || undefined,
       });
       setRealRecommendations(response.recommendations ?? []);
+      setRealRejectedRecommendations(response.rejected_recommendations ?? []);
       setRealMailSignalRecommendations(response.mail_signal_recommendations ?? []);
       setRealRecommendationsGeneratedAt(response.generated_at ?? null);
       const scanned = Number(response.scanned ?? 0);
@@ -1020,7 +1311,7 @@ export function AutoTradingClient() {
     } finally {
       setRealRecommendationsBusy(false);
     }
-  }, [showToast]);
+  }, [dnseAccountSummary?.tradableCash, showToast]);
 
   const handleActionBuyRealRecommendation = useCallback(
     async (row: RealRecommendationRow) => {
@@ -1171,6 +1462,9 @@ export function AutoTradingClient() {
       setPassword("");
       setSessionActive(true);
       await handleProbeAccount();
+      if (!hasDnseSession()) {
+        return;
+      }
       showToast(TOAST_MESSAGES.dnseSessionSaved, "success");
     } catch (error) {
       const message = isAppError(error) ? error.message : TOAST_MESSAGES.dnseLoginFailed;
@@ -1218,7 +1512,7 @@ export function AutoTradingClient() {
       const cashCurrent = extractDnseCashFromRows(balanceRows) ?? extractDnseCashFromRows(accRows);
       const tradableCash = extractDnseTradableCashFromRows(balanceRows) ?? extractDnseTradableCashFromRows(accRows);
       const accountName = extractDnseAccountNameFromRows(accRows);
-      const depositedInfo = extractDnseDepositedAmountFromRows(accRows);
+      const depositedInfo = extractDnseDepositedAmountFromRows([...accRows, ...balanceRows]);
       setDnseAccountSummary({
         accountRows: accRows.length,
         subAccountRows: subRows.length,
@@ -1234,11 +1528,16 @@ export function AutoTradingClient() {
       );
     } catch (error) {
       setDnseAccountSummary(null);
-      setAccountProbeMessage(isAppError(error) ? error.message : UI_TEXT.autoTrading.accountProbeFailed);
+      const message = isAppError(error) ? error.message : UI_TEXT.autoTrading.accountProbeFailed;
+      if (isDnseSessionExpiredError(error)) {
+        setSessionActive(false);
+        showToast(message, "error");
+      }
+      setAccountProbeMessage(message);
     } finally {
       setAccountProbeBusy(false);
     }
-  }, [credsPayload]);
+  }, [credsPayload, showToast]);
 
   useEffect(() => {
     if (accountTab !== "real") {
@@ -1543,22 +1842,90 @@ export function AutoTradingClient() {
         ) : null}
       </div>
       {accountTab === "real" ? (
-        <div className="flex flex-col gap-10">
-          <section className="glass-panel rounded-2xl p-6">
-            <h2 className="text-lg font-semibold text-slate-100">{UI_TEXT.autoTrading.dnseTitle}</h2>
-            <p className="mt-2 text-xs text-slate-400">{UI_TEXT.autoTrading.dnseHint}</p>
-            <p className="mt-3 text-xs text-slate-500">
-              {sessionActive ? UI_TEXT.dnse.sessionActive : UI_TEXT.dnse.sessionNone}
-            </p>
-            <div className="mt-3 flex flex-col gap-3">
+        !sessionActive ? (
+          <section className="glass-panel mx-auto w-full max-w-3xl rounded-xl p-5">
+            <RealSectionHeader
+              title={UI_TEXT.autoTrading.dnseTitle}
+              meta={UI_TEXT.dnse.sessionNone}
+            />
+            <div className="mt-5 grid gap-4 md:grid-cols-2">
+              <div className="rounded-lg border border-white/10 bg-black/20 p-4">
+                <p className="text-sm font-semibold text-slate-100">{UI_TEXT.dnse.credentialsSection}</p>
+                <div className="mt-3 flex flex-col gap-2">
+                  <input
+                    id="at-dnse-user"
+                    className="h-10 rounded-md border border-white/15 bg-black/30 px-3 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-cyan-300/60 focus:ring-2 focus:ring-cyan-300/20"
+                    autoComplete="username"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    placeholder={UI_TEXT.dnse.usernamePlaceholder}
+                  />
+                  <input
+                    className="h-10 rounded-md border border-white/15 bg-black/30 px-3 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-cyan-300/60 focus:ring-2 focus:ring-cyan-300/20"
+                    type="password"
+                    autoComplete="current-password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder={UI_TEXT.dnse.passwordPlaceholder}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void handleDnseLogin()}
+                    disabled={sessionBusy}
+                    className="mt-1 h-10 rounded-md bg-cyan-300/20 px-3 text-xs font-semibold text-cyan-50 transition hover:bg-cyan-300/30 disabled:opacity-50"
+                  >
+                    {sessionBusy ? UI_TEXT.dnse.sessionLoggingIn : UI_TEXT.dnse.sessionLogin}
+                  </button>
+                </div>
+              </div>
+              <div className="rounded-lg border border-white/10 bg-black/20 p-4">
+                <p className="text-sm font-semibold text-slate-100">{UI_TEXT.autoTrading.tokenPasteLabel}</p>
+                <textarea
+                  id="at-dnse-token"
+                  className="mt-3 min-h-[116px] w-full rounded-md border border-white/15 bg-black/30 px-3 py-2 font-mono text-xs text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-cyan-300/60 focus:ring-2 focus:ring-cyan-300/20"
+                  value={tokenInput}
+                  onChange={(e) => setTokenInput(e.target.value)}
+                  placeholder={UI_TEXT.autoTrading.tokenPastePlaceholder}
+                />
+                <button
+                  type="button"
+                  onClick={handleApplyToken}
+                  className="mt-2 h-9 rounded-md border border-cyan-300/40 px-3 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-300/10"
+                >
+                  {UI_TEXT.autoTrading.tokenApply}
+                </button>
+              </div>
+            </div>
+          </section>
+        ) : (
+        <div className="flex flex-col gap-5">
+          <section className="glass-panel rounded-xl p-5">
+            <RealSectionHeader
+              title="REAL Control Center"
+              meta={`Session ${sessionActive ? "ACTIVE" : "NONE"}${realRecommendationsGeneratedAt ? ` | Scan ${formatDateTime(realRecommendationsGeneratedAt)}` : ""}`}
+              action={
+                <>
+                  <RealStatusPill label="Scan schedule" active={realScanOnlyScheduleEnabled} />
+                  <RealStatusPill label="Auto trading" active={Boolean(schedulerStatus?.enabled)} />
+                  <button
+                    type="button"
+                    onClick={handleDnseLogout}
+                    className="h-8 rounded-md border border-white/15 px-3 text-xs font-semibold text-slate-200 transition hover:bg-white/[0.06]"
+                  >
+                    {UI_TEXT.dnse.sessionLogout}
+                  </button>
+                </>
+              }
+            />
+            <div className="mt-4 grid gap-4 xl:grid-cols-[1fr_auto]">
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   onClick={() => setRealAutomationMode("SCAN_ONLY")}
-                  className={`rounded-md border px-3 py-1.5 text-xs font-semibold transition ${
+                  className={`h-9 rounded-md border px-3 text-xs font-semibold transition ${
                     realAutomationMode === "SCAN_ONLY"
-                      ? "border-cyan-300/70 bg-cyan-300/25 text-cyan-50 shadow-[0_0_0_1px_rgba(103,232,249,0.35)]"
-                      : "border-white/10 bg-transparent text-slate-400 hover:border-white/20 hover:bg-white/5 hover:text-slate-200"
+                      ? "border-cyan-300/60 bg-cyan-300/[0.16] text-cyan-50"
+                      : "border-white/10 bg-black/20 text-slate-400 hover:border-cyan-300/25 hover:text-cyan-100"
                   }`}
                   disabled={schedulerBusy}
                 >
@@ -1567,227 +1934,239 @@ export function AutoTradingClient() {
                 <button
                   type="button"
                   onClick={() => setRealAutomationMode("AUTO_TRADING")}
-                  className={`rounded-md border px-3 py-1.5 text-xs font-semibold transition ${
+                  className={`h-9 rounded-md border px-3 text-xs font-semibold transition ${
                     realAutomationMode === "AUTO_TRADING"
-                      ? "border-cyan-300/70 bg-cyan-300/25 text-cyan-50 shadow-[0_0_0_1px_rgba(103,232,249,0.35)]"
-                      : "border-white/10 bg-transparent text-slate-400 hover:border-white/20 hover:bg-white/5 hover:text-slate-200"
+                      ? "border-cyan-300/60 bg-cyan-300/[0.16] text-cyan-50"
+                      : "border-white/10 bg-black/20 text-slate-400 hover:border-cyan-300/25 hover:text-cyan-100"
                   }`}
                   disabled={schedulerBusy}
                 >
                   Auto trading
                 </button>
-              </div>
-
-              <div className="flex flex-wrap items-center justify-start gap-3 sm:justify-between">
                 {realAutomationMode === "SCAN_ONLY" ? (
-                  <>
-                    <span className="text-xs text-slate-400">
-                      Scan-only schedule: {realScanOnlyScheduleEnabled ? "ON" : "OFF"}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setRealScanOnlyScheduleEnabled((v) => !v)}
-                      disabled={schedulerBusy}
-                       className="rounded-md border border-cyan-300/40 px-3 py-2 text-xs font-semibold text-cyan-100 disabled:opacity-50"
-                    >
-                      {realScanOnlyScheduleEnabled ? "Tat scan" : "Bat scan"}
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <span className="text-xs text-slate-400">
-                      Auto trading REAL: {schedulerStatus?.enabled ? "ON" : "OFF"} /{" "}
-                      {schedulerStatus?.running ? "RUNNING" : "STOPPED"}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => void handleToggleScheduler()}
-                      disabled={schedulerBusy || !schedulerStatus}
-                      className="rounded-md border border-cyan-300/40 px-3 py-2 text-xs font-semibold text-cyan-100 disabled:opacity-50"
-                    >
-                      {schedulerBusy ? "Dang toggle..." : schedulerStatus?.enabled ? "Tat Auto" : "Bat Auto"}
-                    </button>
-                  </>
-                )}
-              </div>
-            </div>
-            {!sessionActive ? (
-              <div className="mt-4 grid gap-4 md:grid-cols-2">
-                <div className="flex flex-col gap-2">
-                  <label className="text-xs font-medium text-slate-400" htmlFor="at-dnse-user">
-                    {UI_TEXT.dnse.credentialsSection}
-                  </label>
-                  <input
-                    id="at-dnse-user"
-                    className="rounded-md border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100"
-                    autoComplete="username"
-                    value={username}
-                    onChange={(e) => setUsername(e.target.value)}
-                    placeholder={UI_TEXT.dnse.usernamePlaceholder}
-                  />
-                  <input
-                    className="rounded-md border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100"
-                    type="password"
-                    autoComplete="current-password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder={UI_TEXT.dnse.passwordPlaceholder}
-                  />
-                  <div className="flex flex-wrap gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => void handleDnseLogin()}
-                      disabled={sessionBusy}
-                      className="rounded-md bg-cyan-300/20 px-3 py-2 text-xs font-semibold text-cyan-50 disabled:opacity-50"
-                    >
-                      {sessionBusy ? UI_TEXT.dnse.sessionLoggingIn : UI_TEXT.dnse.sessionLogin}
-                    </button>
-                  </div>
-                </div>
-                <div className="flex flex-col gap-2">
-                  <label className="text-xs font-medium text-slate-400" htmlFor="at-dnse-token">
-                    {UI_TEXT.autoTrading.tokenPasteLabel}
-                  </label>
-                  <textarea
-                    id="at-dnse-token"
-                    className="min-h-[88px] rounded-md border border-white/15 bg-black/30 px-3 py-2 font-mono text-xs text-slate-100"
-                    value={tokenInput}
-                    onChange={(e) => setTokenInput(e.target.value)}
-                    placeholder={UI_TEXT.autoTrading.tokenPastePlaceholder}
-                  />
                   <button
                     type="button"
-                    onClick={handleApplyToken}
-                    className="self-start rounded-md border border-cyan-300/40 px-3 py-2 text-xs font-semibold text-cyan-100"
+                    onClick={() => setRealScanOnlyScheduleEnabled((v) => !v)}
+                    disabled={schedulerBusy}
+                    className="h-9 rounded-md border border-cyan-300/40 px-3 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-300/10 disabled:opacity-50"
                   >
-                    {UI_TEXT.autoTrading.tokenApply}
+                    {realScanOnlyScheduleEnabled ? "Tat scan" : "Bat scan"}
                   </button>
-                </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => void handleToggleScheduler()}
+                    disabled={schedulerBusy || !schedulerStatus}
+                    className="h-9 rounded-md border border-cyan-300/40 px-3 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-300/10 disabled:opacity-50"
+                  >
+                    {schedulerBusy ? "Dang toggle..." : schedulerStatus?.enabled ? "Tat Auto" : "Bat Auto"}
+                  </button>
+                )}
               </div>
-            ) : (
-              <div className="mt-4 flex flex-wrap items-start justify-between gap-4">
+              <div className="flex flex-wrap items-center gap-2 xl:justify-end">
                 <button
                   type="button"
-                  onClick={handleDnseLogout}
-                  className="rounded-md border border-white/15 px-3 py-2 text-xs font-semibold text-slate-200"
+                  onClick={() => void handleProbeAccount()}
+                  disabled={accountProbeBusy}
+                  className="h-9 rounded-md border border-white/15 px-3 text-xs font-semibold text-slate-200 transition hover:bg-white/[0.06] disabled:opacity-50"
                 >
-                  {UI_TEXT.dnse.sessionLogout}
+                  {accountProbeBusy ? UI_TEXT.dnse.loadingAccountInfo : UI_TEXT.dnse.loadAccountInfo}
                 </button>
-                <div className="w-full max-w-[220px] rounded-md border border-cyan-300/20 bg-cyan-300/5 p-3">
-                  <p className="text-xs font-semibold text-cyan-100">QR nap tien DNSE</p>
-                  {DNSE_DEPOSIT_QR_URL ? (
-                    <div className="mt-2 flex justify-center">
+                <button
+                  type="button"
+                  onClick={() => void handlePollRealPendingOrders()}
+                  disabled={realPendingOrdersBusy}
+                  className="h-9 rounded-md border border-white/15 px-3 text-xs font-semibold text-slate-200 transition hover:bg-white/[0.06] disabled:opacity-50"
+                >
+                  {realPendingOrdersBusy ? "Dang poll..." : "Poll DNSE"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleScanRealRecommendations()}
+                  disabled={realRecommendationsBusy}
+                  className="h-9 rounded-md border border-cyan-300/40 px-3 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-300/10 disabled:opacity-50"
+                >
+                  {realRecommendationsBusy ? "Dang scan..." : "Scan recommendations"}
+                </button>
+              </div>
+            </div>
+            {accountProbeMessage ? <p className="mt-3 text-xs text-slate-400">{accountProbeMessage}</p> : null}
+            {schedulerError ? <p className="mt-3 text-xs text-rose-300">{schedulerError}</p> : null}
+            <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-6">
+              <RealMetricCard label="Mode" value={realAutomationMode === "SCAN_ONLY" ? "Scan only" : "Auto trading"} tone="cyan" />
+              <RealMetricCard label="Scan schedule" value={realScanOnlyScheduleEnabled ? "ON" : "OFF"} tone={realScanOnlyScheduleEnabled ? "emerald" : "slate"} />
+              <RealMetricCard label="Auto scheduler" value={schedulerStatus?.enabled ? "ON" : "OFF"} tone={schedulerStatus?.enabled ? "emerald" : "slate"} />
+              <RealMetricCard label="Pending orders" value={realPendingOrders.length} tone={realPendingOrders.length > 0 ? "amber" : "slate"} />
+              <RealMetricCard label="Short-term BUY" value={visibleRealRecommendations.length} tone="cyan" />
+              <RealMetricCard label="Mail / Liquidity" value={`${mailSignalPickCount} / ${liquidityEligibleTotal}`} tone="slate" />
+            </div>
+            <p className="mt-2 text-[11px] text-slate-500">
+              Signal source: Mail cache {mailSignalsSourceLabel}; liquidity pool tu Redis post-close refresh.
+            </p>
+          </section>
+          <section className="glass-panel rounded-xl p-5">
+            <RealSectionHeader
+              title="DNSE Account Snapshot"
+              meta="Cash, buying power, and current positions from DNSE balance response"
+              action={
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="rounded-md border border-emerald-300/35 bg-emerald-300/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-100">
+                    REAL
+                  </span>
+                  <span className="rounded-md border border-cyan-300/25 bg-cyan-300/10 px-2.5 py-1 text-[11px] font-semibold text-cyan-100">
+                    Session active
+                  </span>
+                </div>
+              }
+            />
+            {dnseAccountSummary ? (
+              <div className="mt-4 space-y-4">
+                <div className="grid gap-4 xl:grid-cols-[1fr_13rem]">
+                  <div className="rounded-lg border border-white/10 bg-black/20 p-4">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Account holder</p>
+                        <p className="mt-1 text-lg font-semibold text-slate-100">{dnseAccountSummary.accountName || "-"}</p>
+                      </div>
+                      <div className="text-left sm:text-right">
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Sub-account</p>
+                        <div className="mt-1 flex flex-wrap gap-1.5 sm:justify-end">
+                          {dnseAccountSummary.subAccounts.length > 0 ? (
+                            dnseAccountSummary.subAccounts.map((subAccount) => (
+                              <span
+                                key={subAccount}
+                                className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 font-mono text-[11px] text-emerald-200"
+                              >
+                                {subAccount}
+                              </span>
+                            ))
+                          ) : (
+                            <span className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[11px] text-slate-400">
+                              Not reported
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="mt-4 grid gap-3 lg:grid-cols-3">
+                      <div className="rounded-md border border-amber-300/25 bg-amber-300/10 p-3">
+                        <p className="text-[11px] uppercase tracking-wide text-amber-100/75">Available funds</p>
+                        <p className="mt-1 text-base font-semibold text-amber-100">
+                          {dnseAccountSummary.tradableCash != null ? `${formatVnd(dnseAccountSummary.tradableCash)} VND` : "-"}
+                        </p>
+                        <p
+                          className={`mt-2 text-[11px] ${
+                            dnseAccountSummary.depositedAmount != null &&
+                            dnseAccountSummary.cashCurrent != null &&
+                            dnseAccountSummary.cashCurrent < dnseAccountSummary.depositedAmount
+                              ? "text-rose-200"
+                              : "text-amber-100/75"
+                          }`}
+                        >
+                          Cash balance: {dnseAccountSummary.cashCurrent != null ? `${formatVnd(dnseAccountSummary.cashCurrent)} VND` : "-"}
+                        </p>
+                        {dnseAccountSummary.depositedAmount != null &&
+                        dnseAccountSummary.cashCurrent != null &&
+                        dnseAccountSummary.depositedAmount > 0 ? (
+                          <p className="mt-1 text-[11px] text-slate-400">
+                            {(() => {
+                              const pct =
+                                ((dnseAccountSummary.cashCurrent - dnseAccountSummary.depositedAmount) /
+                                  dnseAccountSummary.depositedAmount) *
+                                100;
+                              const sign = pct > 0 ? "+" : "";
+                              return `${sign}${pct.toFixed(2)}% vs deposited`;
+                            })()}
+                          </p>
+                        ) : null}
+                      </div>
+                      {dnseAccountSummary.depositedAmount != null ? (
+                        <div className="rounded-md border border-cyan-300/25 bg-cyan-300/10 p-3">
+                          <p className="text-[11px] uppercase tracking-wide text-cyan-100/75">Deposited capital</p>
+                          <p className="mt-1 text-base font-semibold text-cyan-100">
+                            {formatVnd(dnseAccountSummary.depositedAmount)} VND
+                          </p>
+                        </div>
+                      ) : null}
+                      <div className="rounded-md border border-white/10 bg-white/[0.04] p-3">
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Portfolio value</p>
+                        <p className="mt-1 text-base font-semibold text-slate-100">
+                          {dnsePortfolioMarketValue > 0 ? `${formatVnd(dnsePortfolioMarketValue)} VND` : "-"}
+                        </p>
+                      </div>
+                    </div>
+                    {dnseAccountSummary.depositedAmount == null ? (
+                      <p className="mt-2 text-[11px] text-slate-500">
+                        DNSE response did not include a deposited-capital field; only cash, buying power, and positions are shown.
+                      </p>
+                    ) : null}
+                  </div>
+                  <div className="rounded-lg border border-white/10 bg-white p-3 text-slate-900">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <div>
+                        <p className="text-xs font-semibold text-slate-900">Deposit QR</p>
+                        <p className="text-[11px] text-slate-500">DNSE funding</p>
+                      </div>
+                      <span className="rounded-md bg-slate-100 px-2 py-1 text-[10px] font-semibold text-slate-600">QR</span>
+                    </div>
+                    {DNSE_DEPOSIT_QR_URL ? (
                       <Image
                         src={DNSE_DEPOSIT_QR_URL}
                         alt="DNSE deposit QR"
-                        width={160}
-                        height={160}
-                        className="h-40 w-40 rounded-md border border-white/10 bg-white p-1 object-contain"
+                        width={184}
+                        height={184}
+                        className="h-44 w-full rounded-md object-contain"
                       />
+                    ) : (
+                      <div className="flex h-44 items-center justify-center rounded-md border border-dashed border-slate-300 text-[11px] text-slate-500">
+                        QR not configured
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-white/10 bg-black/20 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-100">Portfolio positions</p>
+                      <p className="mt-1 text-[11px] text-slate-500">Holdings returned from DNSE balance snapshot.</p>
+                    </div>
+                    <span className="rounded-md border border-white/10 bg-white/[0.04] px-2.5 py-1 text-[11px] font-semibold text-slate-300">
+                      {dnseAccountSummary.holdings.length} symbols
+                    </span>
+                  </div>
+                  {dnseAccountSummary.holdings.length === 0 ? (
+                    <div className="mt-3 rounded-md border border-dashed border-white/10 bg-white/[0.03] p-4">
+                      <p className="text-sm font-semibold text-slate-200">No stock positions returned by DNSE</p>
+                      <p className="mt-1 text-[11px] text-slate-500">
+                        Portfolio is empty, or DNSE did not include holdings in the current account response.
+                      </p>
                     </div>
                   ) : (
-                    <p className="mt-2 text-[11px] text-slate-400">
-                      Chua cau hinh QR. Them `NEXT_PUBLIC_DNSE_DEPOSIT_QR_URL`.
-                    </p>
-                  )}
-                </div>
-              </div>
-            )}
-            <div className="mt-4 border-t border-white/10 pt-4">
-              <button
-                type="button"
-                onClick={() => void handleProbeAccount()}
-                disabled={accountProbeBusy}
-                className="rounded-md bg-white/5 px-3 py-2 text-xs font-semibold text-slate-200 disabled:opacity-50"
-              >
-                {accountProbeBusy ? UI_TEXT.dnse.loadingAccountInfo : UI_TEXT.dnse.loadAccountInfo}
-              </button>
-              {accountProbeMessage ? (
-                <p className="mt-2 text-xs text-slate-400">{accountProbeMessage}</p>
-              ) : null}
-              {sessionActive && dnseAccountSummary ? (
-                <div className="mt-3 space-y-3">
-                  <div className="rounded-md border border-white/10 bg-black/20 p-2">
-                    <p className="text-[11px] text-slate-500">Chu tai khoan</p>
-                    <p className="font-semibold text-cyan-100">{dnseAccountSummary.accountName || "-"}</p>
-                  </div>
-                  <div className="grid gap-2 text-xs text-slate-300 md:grid-cols-4">
-                    <div className="rounded-md border border-emerald-300/25 bg-emerald-300/10 p-2">
-                      <p className="text-[11px] text-emerald-200/80">Cash hien tai</p>
-                      <p
-                        className={`font-semibold ${
-                          dnseAccountSummary.depositedAmount != null &&
-                          dnseAccountSummary.cashCurrent != null &&
-                          dnseAccountSummary.cashCurrent < dnseAccountSummary.depositedAmount
-                            ? "text-rose-200"
-                            : "text-emerald-100"
-                        }`}
-                      >
-                        {(() => {
-                          if (dnseAccountSummary.cashCurrent == null) {
-                            return "-";
-                          }
-                          const cashText = `${formatVnd(dnseAccountSummary.cashCurrent)} VND`;
-                          if (dnseAccountSummary.depositedAmount == null || dnseAccountSummary.depositedAmount <= 0) {
-                            return cashText;
-                          }
-                          const diff = dnseAccountSummary.cashCurrent - dnseAccountSummary.depositedAmount;
-                          const pct = (diff / dnseAccountSummary.depositedAmount) * 100;
-                          const sign = pct > 0 ? "+" : "";
-                          return `${cashText} (${sign}${pct.toFixed(2)}%)`;
-                        })()}
-                      </p>
-                    </div>
-                    <div className="rounded-md border border-cyan-300/25 bg-cyan-300/10 p-2">
-                      <p className="text-[11px] text-cyan-200/80">So tien nap vao</p>
-                      <p className="font-semibold text-cyan-100">
-                        {dnseAccountSummary.depositedAmount != null
-                          ? `${formatVnd(dnseAccountSummary.depositedAmount)} VND`
-                          : "Khong co du lieu initialBalance"}
-                      </p>
-                    </div>
-                    <div className="rounded-md border border-amber-300/25 bg-amber-300/10 p-2">
-                      <p className="text-[11px] text-amber-100/80">Cash kha dung de trading</p>
-                      <p className="font-semibold text-amber-200">
-                        {dnseAccountSummary.tradableCash != null
-                          ? `${formatVnd(dnseAccountSummary.tradableCash)} VND`
-                          : "-"}
-                      </p>
-                    </div>
-                    <div className="rounded-md border border-cyan-300/25 bg-cyan-300/10 p-2">
-                      <p className="text-[11px] text-cyan-200/80">Ma dang nam giu</p>
-                      <p className="font-semibold text-cyan-100">{dnseAccountSummary.holdings.length}</p>
-                    </div>
-                  </div>
-                  <div className="rounded-md border border-white/10 bg-black/20 p-2">
-                    <p className="text-[11px] text-slate-500">Sub-accounts</p>
-                    <p className="font-mono text-[11px] text-emerald-200">
-                      {dnseAccountSummary.subAccounts.length > 0 ? dnseAccountSummary.subAccounts.join(", ") : "-"}
-                    </p>
-                  </div>
-                  <div className="rounded-md border border-white/10 bg-black/20 p-2">
-                    <p className="mb-2 text-[11px] text-slate-400">Danh muc dang nam giu</p>
-                    {dnseAccountSummary.holdings.length === 0 ? (
-                      <p className="text-[11px] text-slate-500">Khong co vi the co phieu hoac DNSE khong tra ve du lieu holdings.</p>
-                    ) : (
-                      <div className="max-h-48 overflow-y-auto overflow-x-auto">
-                        <table className="w-full min-w-[520px] text-left text-[11px] text-slate-200">
-                          <thead className="border-b border-white/10 text-slate-500">
-                            <tr>
-                              <th className="py-1.5 pr-3">Symbol</th>
-                              <th className="py-1.5 pr-3">Qty</th>
-                              <th className="py-1.5 pr-3">Avg</th>
-                              <th className="py-1.5">Market</th>
-                              <th className="py-1.5">Action</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {dnseAccountSummary.holdings.map((row) => (
+                    <div className="mt-3 max-h-56 overflow-y-auto overflow-x-auto">
+                      <table className="w-full min-w-[680px] text-left text-[11px] text-slate-200">
+                        <thead className="border-b border-white/10 text-slate-500">
+                          <tr>
+                            <th className="py-1.5 pr-3">Symbol</th>
+                            <th className="py-1.5 pr-3">Qty</th>
+                            <th className="py-1.5 pr-3">Avg price</th>
+                            <th className="py-1.5 pr-3">Market</th>
+                            <th className="py-1.5 pr-3">Est. value</th>
+                            <th className="py-1.5">Action</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {dnseAccountSummary.holdings.map((row) => {
+                            const markPrice = Number(row.marketPrice ?? row.averagePrice ?? 0);
+                            const estValue =
+                              Number.isFinite(markPrice) && markPrice > 0 && row.quantity > 0 ? markPrice * row.quantity : null;
+                            return (
                               <tr key={row.symbol} className="border-b border-white/5">
                                 <td className="py-1.5 pr-3 font-mono text-cyan-100">{row.symbol}</td>
                                 <td className="py-1.5 pr-3">{row.quantity}</td>
                                 <td className="py-1.5 pr-3">{row.averagePrice != null ? formatPrice(row.averagePrice) : "-"}</td>
                                 <td className="py-1.5 pr-3">{row.marketPrice != null ? formatPrice(row.marketPrice) : "-"}</td>
+                                <td className="py-1.5 pr-3">{estValue != null ? `${formatVnd(estValue)} VND` : "-"}</td>
                                 <td className="py-1.5">
                                   <button
                                     type="button"
@@ -1795,19 +2174,24 @@ export function AutoTradingClient() {
                                     disabled={realHoldingSellBusySymbol === row.symbol}
                                     className="rounded-md border border-amber-300/40 px-2 py-1 text-[11px] font-semibold text-amber-100 disabled:opacity-50"
                                   >
-                                    {realHoldingSellBusySymbol === row.symbol ? "Dang ban..." : "Ban"}
+                                    {realHoldingSellBusySymbol === row.symbol ? "Selling..." : "Sell"}
                                   </button>
                                 </td>
                               </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
-                  </div>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
                 </div>
-              ) : null}
-            </div>
+              </div>
+            ) : (
+              <div className="mt-4 rounded-lg border border-white/10 bg-black/20 p-4">
+                <p className="text-sm font-semibold text-slate-200">Account snapshot not loaded</p>
+                <p className="mt-1 text-[11px] text-slate-500">Refresh the DNSE session to view cash, buying power, and positions.</p>
+              </div>
+            )}
             <div className="mt-4 rounded-md border border-white/10 bg-black/20 p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="text-xs font-semibold text-slate-200">Lenh REAL dang dat nhung chua khop</p>
@@ -1958,7 +2342,9 @@ export function AutoTradingClient() {
               </p>
             ) : null}
             {visibleRealRecommendations.length === 0 ? (
-              <p className="mt-3 text-xs text-slate-500">Chua co khuyen nghi BUY trong Redis.</p>
+              <p className="mt-3 text-xs text-slate-500">
+                Chua co khuyen nghi BUY trong Redis. Xem rejected/reason ben duoi de biet bi chan o scan hay risk.
+              </p>
             ) : (
               <div className="mt-3 overflow-x-auto">
                 <table className="w-full min-w-[920px] text-left text-xs text-slate-200">
@@ -1968,6 +2354,8 @@ export function AutoTradingClient() {
                       <th className="py-2.5 pr-4 whitespace-nowrap">Entry</th>
                       <th className="py-2.5 pr-4 whitespace-nowrap">Take profit</th>
                       <th className="py-2.5 pr-4 whitespace-nowrap">Stop loss</th>
+                      <th className="py-2.5 pr-4 whitespace-nowrap">R/R</th>
+                      <th className="py-2.5 pr-4 whitespace-nowrap">Risk</th>
                       <th className="py-2.5 pr-4 whitespace-nowrap">Confidence</th>
                       <th className="py-2.5 pr-4 whitespace-nowrap">Reason</th>
                       <th className="py-2.5 whitespace-nowrap">Action</th>
@@ -1980,7 +2368,20 @@ export function AutoTradingClient() {
                         <td className="py-2 pr-3 text-slate-100">{formatPrice(item.entry)}</td>
                         <td className="py-2 pr-3 text-emerald-300">{formatPrice(item.take_profit)}</td>
                         <td className="py-2 pr-3 text-rose-300">{formatPrice(item.stop_loss)}</td>
-                        <td className="py-2 pr-3 text-amber-300">{Number(item.confidence || 0).toFixed(1)}%</td>
+                        <td className="py-2 pr-3 text-slate-100">
+                          {item.reward_risk == null ? "-" : Number(item.reward_risk || 0).toFixed(2)}
+                        </td>
+                        <td
+                          className={`py-2 pr-3 ${
+                            String(item.risk_status || "").toUpperCase() === "REJECTED"
+                              ? "text-rose-300"
+                              : "text-emerald-300"
+                          }`}
+                        >
+                          {String(item.risk_status || "-")}
+                          {item.risk_reason && item.risk_reason !== "ok" ? `:${item.risk_reason}` : ""}
+                        </td>
+                            <td className="py-2 pr-3 text-amber-300">{formatConfidencePercent(item.confidence)}</td>
                         <td className="py-2 pr-3 text-slate-300">{item.reason || "-"}</td>
                         <td className="py-2">
                           <button
@@ -1988,6 +2389,7 @@ export function AutoTradingClient() {
                             onClick={() => void handleActionBuyRealRecommendation(item)}
                             disabled={
                               !sessionActive ||
+                              String(item.risk_status || "").toUpperCase() === "REJECTED" ||
                               realRecommendationBuyBusySymbol === item.symbol ||
                               !Number.isFinite(Number(dnseAccountSummary?.tradableCash ?? 0))
                             }
@@ -2002,108 +2404,62 @@ export function AutoTradingClient() {
                 </table>
               </div>
             )}
-          </section>
-
-          <section className="glass-panel rounded-2xl p-6">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <h3 className="text-sm font-semibold text-slate-200">
-                Liquidity Cache Picks (eligible_spike=true + eligible_liquidity=true)
-              </h3>
-              <button
-                type="button"
-                onClick={() => void handleRunPostCloseRefreshNow()}
-                disabled={liquidityRefreshBusy}
-                className="rounded-md border border-cyan-300/40 px-3 py-1.5 text-[11px] font-semibold text-cyan-100 disabled:opacity-50"
-              >
-                {liquidityRefreshBusy ? "Running..." : "Run now"}
-              </button>
-            </div>
-            {liquidityEligibleError ? <p className="mt-2 text-xs text-rose-300">{liquidityEligibleError}</p> : null}
-            {liquidityEligibleRows.length === 0 ? (
-              <p className="mt-3 text-xs text-slate-500">Chua co ma dat du ca 2 dieu kien trong Redis cache.</p>
-            ) : (
-              <div className="mt-3 space-y-3 text-xs text-slate-300">
-                <p className="text-slate-400">
-                  Tong so ma dat chuan: <span className="font-semibold text-cyan-200">{liquidityEligibleTotal}</span>
+            <div className="mt-3 rounded-md border border-white/10 bg-black/20 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs font-semibold text-slate-300">Rejected recommendations</p>
+                <p className="text-[11px] text-slate-500">
+                  risk={visibleRealRejectedRecommendations.length} | scan_gate=
+                  {Number(realRecommendationsScanDiagnostics?.rejected_candidates?.length ?? 0)}
                 </p>
-                <div className="max-h-80 overflow-y-auto overflow-x-auto rounded-md border border-white/10">
-                  <table className="w-full min-w-[760px] text-left text-xs text-slate-200">
-                    <thead className="border-b border-white/10 uppercase tracking-wide text-slate-500">
-                      <tr>
-                        <th className="py-2.5 pr-4 whitespace-nowrap">Symbol</th>
-                        <th className="py-2.5 pr-4 whitespace-nowrap">Exchange</th>
-                        <th className="py-2.5 pr-4 whitespace-nowrap">Spike ratio</th>
-                        <th className="py-2.5 pr-4 whitespace-nowrap">Baseline vol</th>
-                        <th className="py-2.5 pr-4 whitespace-nowrap">Latest vol</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {liquidityEligibleRows.map((row) => (
-                        <tr key={row.redis_key} className="border-b border-white/5 align-top">
-                          <td className="py-2 pr-3 font-mono text-cyan-200">{row.symbol}</td>
-                          <td className="py-2 pr-3 text-slate-300">{row.exchange}</td>
-                          <td className="py-2 pr-3 text-emerald-300">{Number(row.spike_ratio || 0).toFixed(2)}x</td>
-                          <td className="py-2 pr-3 text-slate-100">{formatVnd(Number(row.baseline_vol || 0))}</td>
-                          <td className="py-2 pr-3 text-slate-100">{formatVnd(Number(row.latest_vol || 0))}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
               </div>
-            )}
+              {realRejectedTopReasons.length > 0 ? (
+                <p className="mt-2 text-[11px] text-amber-200">
+                  Top reasons: {realRejectedTopReasons.map(([reason, count]) => `${reason}:${count}`).join(" | ")}
+                </p>
+              ) : null}
+              {visibleRealRejectedRecommendations.length === 0 ? (
+                <p className="mt-2 text-[11px] text-slate-500">Chua co rejected risk rows.</p>
+              ) : (
+                <div className="mt-2 max-h-44 overflow-y-auto text-[11px] font-mono text-slate-300">
+                  {visibleRealRejectedRecommendations.slice(0, 20).map((row, idx) => (
+                    <p key={`risk-rej-${row.symbol}-${idx}`} className="border-b border-white/5 py-1">
+                      <span className="text-cyan-200">{row.symbol}</span> | {String(row.risk_reason || "-")} | setup=
+                      {String(row.setup_type || "-")} | rr={row.reward_risk == null ? "-" : Number(row.reward_risk || 0).toFixed(2)} |
+                      qty={Number(row.suggested_quantity || 0)}
+                    </p>
+                  ))}
+                </div>
+              )}
+              {realRecommendationsScanDiagnostics?.rejected_candidates?.length ? (
+                <div className="mt-2 max-h-36 overflow-y-auto text-[11px] font-mono text-slate-400">
+                  {realRecommendationsScanDiagnostics.rejected_candidates.slice(0, 20).map((row, idx) => (
+                    <p key={`scan-rej-${idx}`} className="border-b border-white/5 py-1">
+                      <span className="text-slate-200">{String(row.symbol || "-")}</span> | scan:{String(row.reason || "-")}
+                    </p>
+                  ))}
+                </div>
+              ) : null}
+            </div>
           </section>
 
-          <section className="glass-panel rounded-2xl p-6">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <h3 className="text-sm font-semibold text-slate-200">Mail Signals</h3>
-              <button
-                type="button"
-                onClick={() => void handleRunMailSignalsNow()}
-                disabled={mailSignalsRunOnceBusy}
-                className="rounded-md border border-cyan-300/40 px-3 py-1.5 text-[11px] font-semibold text-cyan-100 disabled:opacity-50"
-              >
-                {mailSignalsRunOnceBusy ? "Running..." : "Run now"}
-              </button>
-            </div>
-            {mailSignalsError ? <p className="mt-2 text-xs text-rose-300">{mailSignalsError}</p> : null}
-            {!mailSignals ? (
-              <p className="mt-3 text-xs text-slate-500">Chua co du lieu mail signal.</p>
-            ) : (
-              <div className="mt-3 space-y-3 text-xs text-slate-300">
-                {mailSignals.items.length === 0 ? (
-                  <p className="text-slate-500">Khong co ma mua hop le tu mail gan nhat.</p>
-                ) : (
-                  <div className="overflow-x-auto">
-                    <table className="w-full min-w-[760px] text-left text-xs text-slate-200">
-                      <thead className="border-b border-white/10 uppercase tracking-wide text-slate-500">
-                        <tr>
-                          <th className="py-2.5 pr-4 whitespace-nowrap">Symbol</th>
-                          <th className="py-2.5 pr-4 whitespace-nowrap">Entry</th>
-                          <th className="py-2.5 pr-4 whitespace-nowrap">Take profit</th>
-                          <th className="py-2.5 pr-4 whitespace-nowrap">Stop loss</th>
-                          <th className="py-2.5 pr-4 whitespace-nowrap">Confidence</th>
-                          <th className="py-2.5 whitespace-nowrap">Reason</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {mailSignals.items.map((item, idx) => (
-                          <tr key={`${item.symbol}-${idx}`} className="border-b border-white/5 align-top">
-                            <td className="py-2 pr-3 font-mono text-cyan-200">{item.symbol}</td>
-                            <td className="py-2 pr-3 text-slate-100">{formatPrice(item.entry)}</td>
-                            <td className="py-2 pr-3 text-emerald-300">{formatPrice(item.take_profit)}</td>
-                            <td className="py-2 pr-3 text-rose-300">{formatPrice(item.stop_loss)}</td>
-                            <td className="py-2 pr-3 text-amber-300">{(Number(item.confidence || 0) * 100).toFixed(0)}%</td>
-                            <td className="py-2">{item.reason || "-"}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </div>
-            )}
-          </section>
+          <div className="grid gap-5 xl:grid-cols-2">
+            <LiquidityCachePanel
+              rows={liquidityEligibleRows}
+              total={liquidityEligibleTotal}
+              error={liquidityEligibleError}
+              busy={liquidityRefreshBusy}
+              onRunNow={() => void handleRunPostCloseRefreshNow()}
+              compact
+            />
+            <MailSignalsPanel
+              mailSignals={mailSignals}
+              pickCount={mailSignalPickCount}
+              error={mailSignalsError}
+              busy={mailSignalsRunOnceBusy}
+              onRunNow={() => void handleRunMailSignalsNow()}
+              compact
+            />
+          </div>
 
           <section className="glass-panel rounded-2xl p-6">
             <h3 className="text-sm font-semibold text-slate-200">Real Logs</h3>
@@ -2178,38 +2534,6 @@ export function AutoTradingClient() {
                     </div>
                   )}
                 </div>
-                <div className="mt-2 grid gap-2 lg:grid-cols-2">
-                  <div className="rounded-md border border-white/10 bg-black/20 p-2">
-                    <p className="text-[10px] uppercase tracking-wide text-slate-400">Short-term recommendations</p>
-                    {visibleRealRecommendations.length === 0 ? (
-                      <p className="mt-1 text-[10px] text-slate-500">Chua co short-term BUY.</p>
-                    ) : (
-                      <div className="mt-1 max-h-28 space-y-1 overflow-y-auto text-[10px] text-slate-300">
-                        {visibleRealRecommendations.slice(0, 10).map((row, idx) => (
-                          <p key={`${row.symbol}-${idx}`}>
-                            <span className="text-cyan-200">{row.symbol}</span> | entry={formatPrice(row.entry)} | tp=
-                            {formatPrice(row.take_profit)} | sl={formatPrice(row.stop_loss)} | conf={row.confidence.toFixed(1)}%
-                          </p>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                  <div className="rounded-md border border-white/10 bg-black/20 p-2">
-                    <p className="text-[10px] uppercase tracking-wide text-slate-400">Mail-signal recommendations</p>
-                    {visibleRealMailSignalRecommendations.length === 0 ? (
-                      <p className="mt-1 text-[10px] text-slate-500">Chua co mail-signal BUY.</p>
-                    ) : (
-                      <div className="mt-1 max-h-28 space-y-1 overflow-y-auto text-[10px] text-slate-300">
-                        {visibleRealMailSignalRecommendations.slice(0, 10).map((row, idx) => (
-                          <p key={`mail-${row.symbol}-${idx}`}>
-                            <span className="text-violet-200">{row.symbol}</span> | entry={formatPrice(row.entry)} | tp=
-                            {formatPrice(row.take_profit)} | sl={formatPrice(row.stop_loss)} | conf={row.confidence.toFixed(1)}%
-                          </p>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
               </div>
             ) : (
               <div className="mt-3 grid gap-4 lg:grid-cols-2">
@@ -2242,7 +2566,8 @@ export function AutoTradingClient() {
                             <span className={automationRunStatusClass(run.run_status)}>{run.run_status}</span>
                           </p>
                           <p className="text-slate-400">
-                            scan={run.scanned} | buy={run.buy_candidates} | exec={run.executed} | err={run.errors}
+                            scan={run.scanned} | candidate={run.buy_candidates} | risk_rej={run.risk_rejected} | exec=
+                            {run.executed} | exec_rej={run.execution_rejected} | err={run.errors}
                           </p>
                         </div>
                       ))}
@@ -2264,6 +2589,15 @@ export function AutoTradingClient() {
                             <span className="text-rose-300">skipped={run.skipped.length}</span>
                           </p>
                           <p className="text-slate-500">source={run.source_key || "-"}</p>
+                          {run.skipped.length > 0 ? (
+                            <p className="text-amber-300">
+                              skipped:{" "}
+                              {run.skipped
+                                .slice(0, 4)
+                                .map((row) => `${String(row.symbol || "-")}:${String(row.reason || "-")}`)
+                                .join(", ")}
+                            </p>
+                          ) : null}
                         </div>
                       ))}
                     </div>
@@ -2274,6 +2608,7 @@ export function AutoTradingClient() {
           </section>
 
         </div>
+        )
       ) : (
         <div className="flex flex-col gap-8">
           <section className="glass-panel rounded-2xl p-6">
@@ -2586,105 +2921,24 @@ export function AutoTradingClient() {
           </section>
 
           {schedulerError ? <p className="text-xs text-rose-300">{schedulerError}</p> : null}
-          <section className="glass-panel rounded-2xl p-6">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <h3 className="text-sm font-semibold text-slate-200">
-                Liquidity Cache Picks (eligible_spike=true + eligible_liquidity=true)
-              </h3>
-              <button
-                type="button"
-                onClick={() => void handleRunPostCloseRefreshNow()}
-                disabled={liquidityRefreshBusy}
-                className="rounded-md border border-cyan-300/40 px-3 py-1.5 text-[11px] font-semibold text-cyan-100 disabled:opacity-50"
-              >
-                {liquidityRefreshBusy ? "Running..." : "Run now"}
-              </button>
-            </div>
-            {liquidityEligibleError ? <p className="mt-2 text-xs text-rose-300">{liquidityEligibleError}</p> : null}
-            {liquidityEligibleRows.length === 0 ? (
-              <p className="mt-3 text-xs text-slate-500">Chua co ma dat du ca 2 dieu kien trong Redis cache.</p>
-            ) : (
-              <div className="mt-3 space-y-3 text-xs text-slate-300">
-                <p className="text-slate-400">
-                  Tong so ma dat chuan: <span className="font-semibold text-cyan-200">{liquidityEligibleTotal}</span>
-                </p>
-                <div className="max-h-80 overflow-y-auto overflow-x-auto rounded-md border border-white/10">
-                  <table className="w-full min-w-[760px] text-left text-xs text-slate-200">
-                    <thead className="border-b border-white/10 uppercase tracking-wide text-slate-500">
-                      <tr>
-                        <th className="py-2.5 pr-4 whitespace-nowrap">Symbol</th>
-                        <th className="py-2.5 pr-4 whitespace-nowrap">Exchange</th>
-                        <th className="py-2.5 pr-4 whitespace-nowrap">Spike ratio</th>
-                        <th className="py-2.5 pr-4 whitespace-nowrap">Baseline vol</th>
-                        <th className="py-2.5 pr-4 whitespace-nowrap">Latest vol</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {liquidityEligibleRows.map((row) => (
-                        <tr key={row.redis_key} className="border-b border-white/5 align-top">
-                          <td className="py-2 pr-3 font-mono text-cyan-200">{row.symbol}</td>
-                          <td className="py-2 pr-3 text-slate-300">{row.exchange}</td>
-                          <td className="py-2 pr-3 text-emerald-300">{Number(row.spike_ratio || 0).toFixed(2)}x</td>
-                          <td className="py-2 pr-3 text-slate-100">{formatVnd(Number(row.baseline_vol || 0))}</td>
-                          <td className="py-2 pr-3 text-slate-100">{formatVnd(Number(row.latest_vol || 0))}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-          </section>
-          <section className="glass-panel rounded-2xl p-6">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <h3 className="text-sm font-semibold text-slate-200">Mail Signals</h3>
-              <button
-                type="button"
-                onClick={() => void handleRunMailSignalsNow()}
-                disabled={mailSignalsRunOnceBusy}
-                className="rounded-md border border-cyan-300/40 px-3 py-1.5 text-[11px] font-semibold text-cyan-100 disabled:opacity-50"
-              >
-                {mailSignalsRunOnceBusy ? "Running..." : "Run now"}
-              </button>
-            </div>
-            {mailSignalsError ? <p className="mt-2 text-xs text-rose-300">{mailSignalsError}</p> : null}
-            {!mailSignals ? (
-              <p className="mt-3 text-xs text-slate-500">Chua co du lieu mail signal.</p>
-            ) : (
-              <div className="mt-3 space-y-3 text-xs text-slate-300">
-                {mailSignals.items.length === 0 ? (
-                  <p className="text-slate-500">Khong co ma mua hop le tu mail gan nhat.</p>
-                ) : (
-                  <div className="overflow-x-auto">
-                    <table className="w-full min-w-[760px] text-left text-xs text-slate-200">
-                      <thead className="border-b border-white/10 uppercase tracking-wide text-slate-500">
-                        <tr>
-                          <th className="py-2.5 pr-4 whitespace-nowrap">Symbol</th>
-                          <th className="py-2.5 pr-4 whitespace-nowrap">Entry</th>
-                          <th className="py-2.5 pr-4 whitespace-nowrap">Take profit</th>
-                          <th className="py-2.5 pr-4 whitespace-nowrap">Stop loss</th>
-                          <th className="py-2.5 pr-4 whitespace-nowrap">Confidence</th>
-                          <th className="py-2.5 whitespace-nowrap">Reason</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {mailSignals.items.map((item, idx) => (
-                          <tr key={`${item.symbol}-${idx}`} className="border-b border-white/5 align-top">
-                            <td className="py-2 pr-3 font-mono text-cyan-200">{item.symbol}</td>
-                            <td className="py-2 pr-3 text-slate-100">{formatPrice(item.entry)}</td>
-                            <td className="py-2 pr-3 text-emerald-300">{formatPrice(item.take_profit)}</td>
-                            <td className="py-2 pr-3 text-rose-300">{formatPrice(item.stop_loss)}</td>
-                            <td className="py-2 pr-3 text-amber-300">{(Number(item.confidence || 0) * 100).toFixed(0)}%</td>
-                            <td className="py-2">{item.reason || "-"}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </div>
-            )}
-          </section>
+          <div className="grid gap-5 xl:grid-cols-2">
+            <LiquidityCachePanel
+              rows={liquidityEligibleRows}
+              total={liquidityEligibleTotal}
+              error={liquidityEligibleError}
+              busy={liquidityRefreshBusy}
+              onRunNow={() => void handleRunPostCloseRefreshNow()}
+              compact
+            />
+            <MailSignalsPanel
+              mailSignals={mailSignals}
+              pickCount={mailSignalPickCount}
+              error={mailSignalsError}
+              busy={mailSignalsRunOnceBusy}
+              onRunNow={() => void handleRunMailSignalsNow()}
+              compact
+            />
+          </div>
 
           <div>
             <section className="glass-panel rounded-2xl p-6">
@@ -2719,74 +2973,77 @@ export function AutoTradingClient() {
             </section>
           </div>
           <section className="glass-panel rounded-2xl p-6">
-            <h3 className="text-sm font-semibold text-slate-200">Demo Logs</h3>
-            <p className="mt-1 text-xs text-slate-500">
-              Log backend automation va mail entry cho demo session dang chon. Runs DEMO khong co session_id trong detail (scheduler
-              chua gan session) van duoc hien thi. Short-term chi chay khi slot grid trong phien VN va Auto DEMO bat.
-            </p>
-            <div className="mt-3 grid gap-4 lg:grid-cols-2">
-              <div className="rounded-md border border-white/10 bg-black/20 p-3">
-                <div className="flex flex-wrap items-end justify-between gap-2">
-                  <p className="text-xs font-semibold text-slate-300">Automation Logs (DEMO)</p>
-                  <label className="flex flex-col gap-1 text-[11px] text-slate-400" htmlFor="at-log-scope-filter">
-                    Log scope
-                    <select
-                      id="at-log-scope-filter"
-                      className="rounded-md border border-white/15 bg-black/30 px-2 py-1 font-mono text-[11px] text-slate-100"
-                      value={automationLogScopeFilter}
-                      onChange={(e) => setAutomationLogScopeFilter(e.target.value as "ANY" | ShortTermExchangeScope)}
-                    >
-                      <option value="ANY">ANY</option>
-                      <option value="ALL">ALL</option>
-                      <option value="HOSE">HOSE</option>
-                      <option value="HNX">HNX</option>
-                      <option value="UPCOM">UPCOM</option>
-                    </select>
-                  </label>
-                </div>
-                {automationRunsError ? <p className="mt-2 text-[11px] text-rose-300">{automationRunsError}</p> : null}
-                {automationRuns.length === 0 ? (
-                  <p className="mt-2 text-[11px] text-slate-500">Chua co run log.</p>
-                ) : (
-                  <div className="mt-2 max-h-72 space-y-2 overflow-y-auto text-[11px] font-mono text-slate-300">
-                    {automationRunLogGroups.map((sessionBlock, sessionIdx) => (
-                      <div key={sessionBlock.sessionId ?? "ACCOUNT_MODE_SCOPE"} className="border-b border-white/5 pb-2">
-                        {sessionBlock.sessionId ? (
-                          <p className={`text-cyan-300 ${sessionIdx > 0 ? "pt-1" : ""}`}>session={sessionBlock.sessionId}</p>
-                        ) : null}
-                        {sessionBlock.groups.map((group) =>
-                          group.runs.map((run) => (
-                            <p key={run.id} className="text-slate-300">
-                              <span className="text-cyan-200">{formatDateTime(run.started_at)}</span> |{" "}
-                              <span className={automationRunStatusClass(run.run_status)}>{run.run_status}</span> |{" "}
-                              scope={group.bucket} | scan={run.scanned} | buy={run.buy_candidates} | exec={run.executed} | err={run.errors}
-                            </p>
-                          )),
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-slate-200">Demo Logs</h3>
+                <p className="mt-1 text-xs text-slate-500">
+                  Session {demoSessionId || "-"} | auto {demoAutomationLogRows.length} | mail {mailSignalEntryRuns.length}
+                </p>
               </div>
-              <div className="rounded-md border border-white/10 bg-black/20 p-3">
-                <p className="text-xs font-semibold text-slate-300">Mail Entry Scheduler Log (10 gan nhat)</p>
-                {mailSignalEntryRunError ? <p className="mt-2 text-[11px] text-rose-300">{mailSignalEntryRunError}</p> : null}
-                {mailSignalEntryRuns.length === 0 ? (
-                  <p className="mt-2 text-[11px] text-slate-500">Chua co log entry scheduler.</p>
-                ) : (
-                  <div className="mt-2 max-h-72 space-y-2 overflow-y-auto text-[11px] font-mono text-slate-300">
-                    {mailSignalEntryRuns.map((run, runIdx) => (
-                      <div key={`${run.redis_key}-${runIdx}`} className="border-b border-white/5 pb-2">
-                        <p>
-                          <span className="text-cyan-200">{formatDateTime(run.ran_at)}</span> | scanned={run.scanned} | executed=
-                          <span className="text-emerald-300">{run.executed.length}</span> | skipped=
-                          <span className="text-rose-300">{run.skipped.length}</span>
-                        </p>
-                        <p className="text-slate-500">source={run.source_key || "-"}</p>
-                      </div>
-                    ))}
+              <label className="flex items-center gap-2 text-[11px] text-slate-400" htmlFor="at-log-scope-filter">
+                Scope
+                <select
+                  id="at-log-scope-filter"
+                  className="rounded-md border border-white/15 bg-black/30 px-2 py-1 font-mono text-[11px] text-slate-100"
+                  value={automationLogScopeFilter}
+                  onChange={(e) => setAutomationLogScopeFilter(e.target.value as "ANY" | ShortTermExchangeScope)}
+                >
+                  <option value="ANY">ANY</option>
+                  <option value="ALL">ALL</option>
+                  <option value="HOSE">HOSE</option>
+                  <option value="HNX">HNX</option>
+                  <option value="UPCOM">UPCOM</option>
+                </select>
+              </label>
+            </div>
+            {automationRunsError ? <p className="mt-3 text-[11px] text-rose-300">{automationRunsError}</p> : null}
+            {mailSignalEntryRunError ? <p className="mt-2 text-[11px] text-rose-300">{mailSignalEntryRunError}</p> : null}
+            <div className="mt-3 overflow-hidden rounded-md border border-white/10">
+              <div className="grid grid-cols-[6.5rem_5rem_1fr_6rem] border-b border-white/10 bg-white/[0.03] px-3 py-2 text-[10px] uppercase tracking-wide text-slate-500 md:grid-cols-[8.5rem_5rem_1fr_6rem]">
+                <span>Time</span>
+                <span>Type</span>
+                <span>Result</span>
+                <span className="text-right">Status</span>
+              </div>
+              <div className="max-h-72 overflow-y-auto text-[11px] font-mono text-slate-300">
+                {demoAutomationLogRows.length === 0 && mailSignalEntryRuns.length === 0 ? (
+                  <p className="px-3 py-3 text-slate-500">Chua co log demo.</p>
+                ) : null}
+                {demoAutomationLogRows.map(({ run, scope }) => (
+                  <div
+                    key={`demo-auto-${run.id}`}
+                    className="grid grid-cols-[6.5rem_5rem_1fr_6rem] items-center gap-2 border-b border-white/5 px-3 py-2 md:grid-cols-[8.5rem_5rem_1fr_6rem]"
+                  >
+                    <span className="truncate text-cyan-200">{formatDateTime(run.started_at)}</span>
+                    <span className="text-slate-400">AUTO</span>
+                    <span className="truncate">
+                      {scope} | scan {run.scanned} | buy {run.buy_candidates} | risk {run.risk_rejected} | exec {run.executed}
+                      {run.execution_rejected || run.errors ? ` | rej ${run.execution_rejected} | err ${run.errors}` : ""}
+                    </span>
+                    <span className={`text-right ${automationRunStatusClass(run.run_status)}`}>{run.run_status}</span>
                   </div>
-                )}
+                ))}
+                {mailSignalEntryRuns.map((run, runIdx) => (
+                  <div
+                    key={`demo-mail-${run.redis_key}-${runIdx}`}
+                    className="grid grid-cols-[6.5rem_5rem_1fr_6rem] items-center gap-2 border-b border-white/5 px-3 py-2 md:grid-cols-[8.5rem_5rem_1fr_6rem]"
+                  >
+                    <span className="truncate text-cyan-200">{formatDateTime(run.ran_at)}</span>
+                    <span className="text-violet-300">MAIL</span>
+                    <span className="truncate">
+                      scan {run.scanned} | exec {run.executed.length} | skip {run.skipped.length}
+                      {run.skipped.length > 0
+                        ? ` | ${run.skipped
+                            .slice(0, 3)
+                            .map((row) => `${String(row.symbol || "-")}:${String(row.reason || "-")}`)
+                            .join(", ")}`
+                        : ""}
+                    </span>
+                    <span className={`text-right ${run.success ? "text-emerald-300" : "text-rose-300"}`}>
+                      {run.success ? "OK" : "FAIL"}
+                    </span>
+                  </div>
+                ))}
               </div>
             </div>
           </section>

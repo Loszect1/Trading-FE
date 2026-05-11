@@ -96,7 +96,12 @@ export interface MailSignalsData {
   mail_count: number;
   items: MailSignalPick[];
   generated_at: string;
-  source_message_ids: string[];
+  source?: string;
+  source_message_ids?: string[];
+  note?: string;
+  latest_empty_redis_key?: string;
+  latest_empty_note?: string;
+  latest_empty_generated_at?: string;
 }
 
 export interface MailSignalEntryRunData {
@@ -114,6 +119,8 @@ export interface MailSignalEntryRunData {
   }>;
   skipped: Array<Record<string, unknown>>;
   ran_at: string;
+  error?: string | null;
+  effective_nav_vnd?: number;
 }
 
 export interface MailSignalEntryRunsResponse {
@@ -134,6 +141,19 @@ export interface RealRecommendationRow {
   stop_loss: number;
   confidence: number;
   reason: string;
+  reward_risk?: number | null;
+  risk_status?: "BUYABLE" | "PREFLIGHT_OK" | "REJECTED" | "UNKNOWN" | string;
+  risk_reason?: string;
+  suggested_quantity?: number;
+  suggested_notional?: number;
+  setup_type?: string | null;
+  setup?: Record<string, unknown>;
+  freshness?: Record<string, unknown>;
+  relative_strength?: Record<string, unknown>;
+  sector_breadth?: Record<string, unknown>;
+  settlement_pressure?: Record<string, unknown>;
+  account_preflight?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
 }
 
 export interface ShortTermScanDiagnostics {
@@ -143,11 +163,13 @@ export interface ShortTermScanDiagnostics {
   skipped_entry_gate?: number;
   skipped_experience_cooldown?: number;
   skipped_dynamic_buy_floor?: number;
+  skipped_stale_data?: number;
   price_history_cache_hits?: number;
   price_history_vnstock_calls?: number;
   price_history_missing?: number;
   dynamic_buy_composite_floor?: number;
   buy_signals_written?: number;
+  rejected_candidates?: Array<Record<string, unknown>>;
 }
 
 export interface RealRecommendationsData {
@@ -159,6 +181,9 @@ export interface RealRecommendationsData {
   count: number;
   short_term_recommendations?: RealRecommendationRow[];
   short_term_count?: number;
+  all_short_term_recommendations?: RealRecommendationRow[];
+  rejected_recommendations?: RealRecommendationRow[];
+  rejected_count?: number;
   mail_signal_recommendations?: RealRecommendationRow[];
   mail_signal_count?: number;
   scan_diagnostics?: ShortTermScanDiagnostics | null;
@@ -171,6 +196,7 @@ export interface RealRecommendationsRecentRow extends RealRecommendationsData {
 export interface RealRecommendationScanRequest {
   exchange_scope?: ShortTermExchangeScope;
   limit_symbols?: number;
+  real_account_available_cash_vnd?: number;
 }
 
 export interface RealRecommendationActionBuyRequest extends RealRecommendationRow {

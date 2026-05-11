@@ -15,6 +15,7 @@ import {
   fetchDnseDefaults,
   fetchDnseSubAccounts,
   isAppError,
+  isDnseSessionExpiredError,
   pickSubAccountNumbers,
   placeDnseOrder,
   requestDnseEmailOtp,
@@ -128,9 +129,14 @@ export function DnseTradePanel({ symbol }: DnseTradePanelProps) {
         showToast(TOAST_MESSAGES.dnseAccountLoaded, "success");
       }
     } catch (error) {
+      if (isDnseSessionExpiredError(error)) {
+        setSessionActive(false);
+      }
       if (showFeedback) {
         const message = isAppError(error) ? error.message : TOAST_MESSAGES.dnseAccountLoadFailed;
         showToast(message, "error");
+      } else if (isDnseSessionExpiredError(error) && isAppError(error)) {
+        showToast(error.message, "error");
       }
     } finally {
       setAccountLoading(false);
