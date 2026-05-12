@@ -1,9 +1,9 @@
 import axios from "axios";
 import { clearDnseSession, getDnseAccessToken, setDnseSession } from "@/lib/dnse-session";
-import { API_REQUEST_TIMEOUT_MS, httpClient, normalizeError } from "@/services/http-client";
+import { API_NO_TIMEOUT_MS, httpClient, normalizeError } from "@/services/http-client";
 
-/** DNSE calls can exceed default API timeout (login, OTP, place order). */
-const DNSE_REQUEST_TIMEOUT_MS = API_REQUEST_TIMEOUT_MS;
+/** DNSE manual calls can exceed the default API timeout (login, OTP, place order). */
+const DNSE_REQUEST_TIMEOUT_MS = API_NO_TIMEOUT_MS;
 const DNSE_SESSION_EXPIRED_ERROR_CODE = "dnse_session_expired";
 const DNSE_SESSION_EXPIRED_MESSAGE = "Phiên DNSE đã hết hạn. Vui lòng đăng nhập lại.";
 const DNSE_SESSION_EXPIRED_EVENT = "vnstock:dnse-session-expired";

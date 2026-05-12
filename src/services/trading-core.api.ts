@@ -1,4 +1,4 @@
-import { httpClient, normalizeError } from "@/services/http-client";
+import { API_NO_TIMEOUT_MS, httpClient, normalizeError } from "@/services/http-client";
 import type { CorePositionRow, CoreSettlementRow } from "@/types/operational";
 
 export interface ExecutionPlaceBody {
@@ -50,7 +50,9 @@ export interface CorePortfolioSummary {
 
 export async function placeExecutionOrder(body: ExecutionPlaceBody): Promise<Record<string, unknown>> {
   try {
-    const response = await httpClient.post<Record<string, unknown>>("/execution/place", body);
+    const response = await httpClient.post<Record<string, unknown>>("/execution/place", body, {
+      timeout: API_NO_TIMEOUT_MS,
+    });
     return response.data;
   } catch (error) {
     throw normalizeError(error);
@@ -110,7 +112,11 @@ export async function getCoreSettlementRows(
 
 export async function processExecutionOrder(orderId: string): Promise<Record<string, unknown>> {
   try {
-    const response = await httpClient.post<Record<string, unknown>>(`/execution/process/${encodeURIComponent(orderId)}`);
+    const response = await httpClient.post<Record<string, unknown>>(
+      `/execution/process/${encodeURIComponent(orderId)}`,
+      {},
+      { timeout: API_NO_TIMEOUT_MS },
+    );
     return response.data;
   } catch (error) {
     throw normalizeError(error);
@@ -130,7 +136,11 @@ export async function getOrderEvents(orderId: string): Promise<CoreOrderEventRow
 
 export async function reconcileExecutionOrder(orderId: string): Promise<Record<string, unknown>> {
   try {
-    const response = await httpClient.post<Record<string, unknown>>(`/execution/reconcile/${encodeURIComponent(orderId)}`);
+    const response = await httpClient.post<Record<string, unknown>>(
+      `/execution/reconcile/${encodeURIComponent(orderId)}`,
+      {},
+      { timeout: API_NO_TIMEOUT_MS },
+    );
     return response.data;
   } catch (error) {
     throw normalizeError(error);
@@ -139,10 +149,14 @@ export async function reconcileExecutionOrder(orderId: string): Promise<Record<s
 
 export async function cancelExecutionOrder(orderId: string, reason = "manual_cancel_from_auto_trading_real"): Promise<Record<string, unknown>> {
   try {
-    const response = await httpClient.post<Record<string, unknown>>("/execution/cancel", {
-      order_id: orderId,
-      reason,
-    });
+    const response = await httpClient.post<Record<string, unknown>>(
+      "/execution/cancel",
+      {
+        order_id: orderId,
+        reason,
+      },
+      { timeout: API_NO_TIMEOUT_MS },
+    );
     return response.data;
   } catch (error) {
     throw normalizeError(error);

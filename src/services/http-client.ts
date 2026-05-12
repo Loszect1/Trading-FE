@@ -14,6 +14,7 @@ function resolveApiBaseUrl(): string {
 
 const baseURL = resolveApiBaseUrl();
 export const API_REQUEST_TIMEOUT_MS = 30 * 60 * 1000;
+export const API_NO_TIMEOUT_MS = 0;
 
 export const httpClient = axios.create({
   baseURL,

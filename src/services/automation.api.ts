@@ -1,4 +1,4 @@
-import { httpClient, normalizeError } from "@/services/http-client";
+import { API_NO_TIMEOUT_MS, httpClient, normalizeError } from "@/services/http-client";
 import type { SchedulerStateRow, SchedulerStatus } from "@/types/operational";
 
 export type ShortTermExchangeScope = "ALL" | "HOSE" | "HNX" | "UPCOM";
@@ -316,7 +316,9 @@ export async function fetchShortTermRuns(
 
 export async function postShortTermRunCycle(body: ShortTermCycleRunRequest): Promise<ShortTermCycleRunResponse> {
   try {
-    const response = await httpClient.post<ShortTermCycleRunResponse>("/automation/short-term/run-cycle", body);
+    const response = await httpClient.post<ShortTermCycleRunResponse>("/automation/short-term/run-cycle", body, {
+      timeout: API_NO_TIMEOUT_MS,
+    });
     return response.data;
   } catch (error) {
     throw normalizeError(error);
@@ -350,6 +352,7 @@ export async function postMailSignalsRunOnce(): Promise<MailSignalsData | null> 
     const response = await httpClient.post<{ success: boolean; data: MailSignalsData | null }>(
       "/automation/mail-signals/run-once",
       {},
+      { timeout: API_NO_TIMEOUT_MS },
     );
     return response.data.data ?? null;
   } catch (error) {
@@ -397,6 +400,7 @@ export async function postMailSignalEntryRunOnce(
     const response = await httpClient.post<{ success: boolean; data: MailSignalEntryRunData | null }>(
       "/automation/mail-signals/entry-run-once",
       body,
+      { timeout: API_NO_TIMEOUT_MS },
     );
     return response.data.data ?? null;
   } catch (error) {
@@ -430,6 +434,7 @@ export async function postShortTermPostCloseRefreshRunOnce(): Promise<Record<str
     const response = await httpClient.post<{ success: boolean; data: Record<string, unknown> }>(
       "/automation/short-term/post-close-refresh/run-once",
       {},
+      { timeout: API_NO_TIMEOUT_MS },
     );
     return response.data.data ?? {};
   } catch (error) {
@@ -442,6 +447,7 @@ export async function postRealRecommendationsScan(body: RealRecommendationScanRe
     const response = await httpClient.post<{ success: boolean; data: RealRecommendationsData }>(
       "/automation/real/recommendations/scan",
       body,
+      { timeout: API_NO_TIMEOUT_MS },
     );
     return response.data.data;
   } catch (error) {
@@ -473,7 +479,9 @@ export async function fetchRealRecommendationsRecent(limit = 10): Promise<RealRe
 
 export async function postRealRecommendationActionBuy(body: RealRecommendationActionBuyRequest): Promise<Record<string, unknown>> {
   try {
-    const response = await httpClient.post<Record<string, unknown>>("/automation/real/recommendations/action-buy", body);
+    const response = await httpClient.post<Record<string, unknown>>("/automation/real/recommendations/action-buy", body, {
+      timeout: API_NO_TIMEOUT_MS,
+    });
     return response.data;
   } catch (error) {
     throw normalizeError(error);
