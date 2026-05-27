@@ -32,11 +32,11 @@ import {
 } from "@/services/dnse.api";
 import {
   deleteCurrentDemoSession,
+  depositDemoCash,
   fetchDemoOverview,
   createNewDemoSession,
   fetchDemoAccount,
   fetchDemoSessions,
-  transferDemoStrategyCash,
   type DemoSessionOverviewData,
 } from "@/services/auto-trading.api";
 import {
@@ -66,6 +66,7 @@ import {
   type ShortTermRunLogScopeBucket,
   type RealRecommendationRow,
   type RealRecommendationsRecentRow,
+  type RealWatchCandidateRow,
   type LiquidityEligibleCacheRow,
   type ShortTermScanDiagnostics,
 } from "@/services/automation.api";
@@ -79,6 +80,7 @@ import {
   type CoreOrderEventRow,
   type CoreOrderRow,
 } from "@/services/trading-core.api";
+import type { SchedulerStatus } from "@/types/operational";
 
 type AccountTab = "real" | "demo";
 
@@ -602,14 +604,10 @@ export function AutoTradingClient() {
   const realScanOnlySchedulerToggleBusyRef = useRef(false);
   const lastRealScanOnlyScheduleEnabledRef = useRef<boolean | null>(null);
   const [accountTab, setAccountTab] = useState<AccountTab>("real");
-  const [schedulerStatus, setSchedulerStatus] = useState<{
-    account_mode: "REAL" | "DEMO";
-    enabled: boolean;
-    running: boolean;
-    poll_seconds: number;
-    interval_minutes: number;
-    timezone: string;
-  } | null>(null);
+  const [schedulerStatus, setSchedulerStatus] = useState<SchedulerStatus | null>(null);
+  const [realScanOnlySchedulerStatus, setRealScanOnlySchedulerStatus] = useState<
+    (SchedulerStatus & { mode?: string }) | null
+  >(null);
   const [schedulerBusy, setSchedulerBusy] = useState(false);
   const [schedulerError, setSchedulerError] = useState("");
 
@@ -629,6 +627,7 @@ export function AutoTradingClient() {
   const [automationLogScopeFilter, setAutomationLogScopeFilter] = useState<"ANY" | ShortTermExchangeScope>("ANY");
   const [realRecommendations, setRealRecommendations] = useState<RealRecommendationRow[]>([]);
   const [realRejectedRecommendations, setRealRejectedRecommendations] = useState<RealRecommendationRow[]>([]);
+  const [realWatchCandidates, setRealWatchCandidates] = useState<RealWatchCandidateRow[]>([]);
   const [realRecommendationsGeneratedAt, setRealRecommendationsGeneratedAt] = useState<string | null>(null);
   const [realRecommendationsScannedCount, setRealRecommendationsScannedCount] = useState<number | null>(null);
   const [realRecommendationsScanDiagnostics, setRealRecommendationsScanDiagnostics] = useState<ShortTermScanDiagnostics | null>(
@@ -685,13 +684,8 @@ export function AutoTradingClient() {
   const [, setDemoLog] = useState<string[]>([]);
   const [demoOverview, setDemoOverview] = useState<DemoSessionOverviewData | null>(null);
   const [demoOverviewError, setDemoOverviewError] = useState("");
-  const [strategyCashTransferTarget, setStrategyCashTransferTarget] = useState<"SHORT_TERM" | "MAIL_SIGNAL" | "UNALLOCATED">(
-    "SHORT_TERM",
-  );
-  const [strategyCashWithdrawSource, setStrategyCashWithdrawSource] = useState<"SHORT_TERM" | "MAIL_SIGNAL">("SHORT_TERM");
-  const [strategyCashTransferAmount, setStrategyCashTransferAmount] = useState("");
-  const [strategyCashWithdrawAmount, setStrategyCashWithdrawAmount] = useState("");
-  const [strategyCashTransferBusy, setStrategyCashTransferBusy] = useState(false);
+  const [demoDepositAmount, setDemoDepositAmount] = useState("");
+  const [demoDepositBusy, setDemoDepositBusy] = useState(false);
   const [holdingLastPriceBySymbol, setHoldingLastPriceBySymbol] = useState<Record<string, number>>({});
   const [demoPortfolioSnapshot, setDemoPortfolioSnapshot] = useState<DemoPortfolioSnapshot>({
     totalAssets: DEMO_INITIAL_CASH_VND,
@@ -700,6 +694,8 @@ export function AutoTradingClient() {
   });
 
   const schedulerAccountMode: "REAL" | "DEMO" = accountTab === "real" ? "REAL" : "DEMO";
+  const realScanOnlyScheduleActive = Boolean(realScanOnlySchedulerStatus?.enabled ?? realScanOnlyScheduleEnabled);
+  const realScanOnlyWorkerRunning = Boolean(realScanOnlySchedulerStatus?.running);
 
   const automationRunLogGroups = useMemo(() => {
     const runsByMode = automationRuns.filter((run) => {
@@ -808,6 +804,11 @@ export function AutoTradingClient() {
       .sort((a, b) => b.value - a.value)
       .slice(0, 8);
   }, [demoOverview]);
+  const demoOverviewInitialBalance = Number(demoOverview?.initial_balance ?? DEMO_INITIAL_CASH_VND);
+  const demoOverviewTotalAssets = Number(demoOverview?.total_assets ?? demoPortfolioSnapshot.totalAssets ?? demoCash);
+  const demoOverviewCashAvailable = Number(demoOverview?.cash_balance ?? demoPortfolioSnapshot.cashAvailable ?? demoCash);
+  const demoOverviewStockValue = Number(demoOverview?.stock_value ?? demoPortfolioSnapshot.stockValue ?? 0);
+  const demoOverviewPnl = demoOverviewTotalAssets - demoOverviewInitialBalance;
   const realRecommendationsFresh = useMemo(
     () => isWithinFreshWindow(realRecommendationsGeneratedAt, realRecommendationsFreshMinutes),
     [realRecommendationsFreshMinutes, realRecommendationsGeneratedAt],
@@ -819,6 +820,10 @@ export function AutoTradingClient() {
   const visibleRealRejectedRecommendations = useMemo(
     () => (realRecommendationsFresh ? realRejectedRecommendations : []),
     [realRejectedRecommendations, realRecommendationsFresh],
+  );
+  const visibleRealWatchCandidates = useMemo(
+    () => (realRecommendationsFresh ? realWatchCandidates : []),
+    [realRecommendationsFresh, realWatchCandidates],
   );
   const realRejectedTopReasons = useMemo(() => {
     const counts = new Map<string, number>();
@@ -992,59 +997,36 @@ export function AutoTradingClient() {
     [pushDemoLog],
   );
 
-  const handleTransferUnallocatedCash = useCallback(async () => {
-    const amount = Number(strategyCashTransferAmount);
+  const handleDepositDemoCash = useCallback(async () => {
+    const amount = Math.trunc(Number(demoDepositAmount));
     if (!Number.isFinite(amount) || amount <= 0) {
-      setDemoOverviewError("So tien chuyen phai > 0.");
+      setDemoOverviewError("So tien nap them phai > 0.");
       return;
     }
-    setStrategyCashTransferBusy(true);
-    try {
-      await transferDemoStrategyCash(demoSessionId, {
-        from_strategy: "UNALLOCATED",
-        to_strategy: strategyCashTransferTarget,
-        amount_vnd: amount,
-      });
-      if (strategyCashTransferTarget === "UNALLOCATED") {
-        pushDemoLog(`Da nap them ${formatVnd(amount)} VND tu ben ngoai vao UNALLOCATED.`);
-      } else {
-        pushDemoLog(`Da chuyen ${formatVnd(amount)} VND tu UNALLOCATED sang ${strategyCashTransferTarget}.`);
-      }
-      setStrategyCashTransferAmount("");
-      await refreshDemoOverview(demoSessionId);
-    } catch (error) {
-      const message = isAppError(error) ? error.message : "Chuyen tien strategy that bai.";
-      setDemoOverviewError(message);
-      pushDemoLog(message);
-    } finally {
-      setStrategyCashTransferBusy(false);
-    }
-  }, [demoSessionId, pushDemoLog, refreshDemoOverview, strategyCashTransferAmount, strategyCashTransferTarget]);
-
-  const handleWithdrawToUnallocated = useCallback(async () => {
-    const amount = Number(strategyCashWithdrawAmount);
-    if (!Number.isFinite(amount) || amount <= 0) {
-      setDemoOverviewError("So tien rut phai > 0.");
+    if (!demoSessionId.trim()) {
+      setDemoOverviewError("Chua co demo session de nap tien.");
       return;
     }
-    setStrategyCashTransferBusy(true);
+    setDemoDepositBusy(true);
     try {
-      await transferDemoStrategyCash(demoSessionId, {
-        from_strategy: strategyCashWithdrawSource,
-        to_strategy: "UNALLOCATED",
-        amount_vnd: amount,
-      });
-      pushDemoLog(`Da rut ${formatVnd(amount)} VND tu ${strategyCashWithdrawSource} ve UNALLOCATED.`);
-      setStrategyCashWithdrawAmount("");
-      await refreshDemoOverview(demoSessionId);
+      await depositDemoCash(demoSessionId, amount);
+      setDemoDepositAmount("");
+      setDemoOverviewError("");
+      pushDemoLog(`Da nap them ${formatVnd(amount)} VND vao demo session.`);
+      showToast(`Da nap them ${formatVnd(amount)} VND vao tai khoan demo.`, "success");
+      await Promise.all([
+        refreshDemoOverview(demoSessionId),
+        refreshDemoAccount(demoSessionId, { offset: 0 }),
+      ]);
     } catch (error) {
-      const message = isAppError(error) ? error.message : "Rut tien ve UNALLOCATED that bai.";
+      const message = isAppError(error) ? error.message : "Nap tien demo that bai.";
       setDemoOverviewError(message);
       pushDemoLog(message);
+      showToast(message, "error");
     } finally {
-      setStrategyCashTransferBusy(false);
+      setDemoDepositBusy(false);
     }
-  }, [demoSessionId, pushDemoLog, refreshDemoOverview, strategyCashWithdrawAmount, strategyCashWithdrawSource]);
+  }, [demoDepositAmount, demoSessionId, pushDemoLog, refreshDemoAccount, refreshDemoOverview, showToast]);
 
   const loadSchedulerStatus = useCallback(async () => {
     try {
@@ -1052,6 +1034,7 @@ export function AutoTradingClient() {
       setSchedulerStatus(status);
       if (schedulerAccountMode === "REAL") {
         const scanOnlyStatus = await fetchRealScanOnlySchedulerStatus();
+        setRealScanOnlySchedulerStatus(scanOnlyStatus);
         const scanOnlyEnabled = Boolean(scanOnlyStatus.enabled);
         setRealScanOnlyScheduleEnabled(scanOnlyEnabled);
         lastRealScanOnlyScheduleEnabledRef.current = scanOnlyEnabled;
@@ -1060,10 +1043,13 @@ export function AutoTradingClient() {
         } else if (status.enabled) {
           setRealAutomationMode("AUTO_TRADING");
         }
+      } else {
+        setRealScanOnlySchedulerStatus(null);
       }
       setSchedulerError("");
     } catch (error) {
       setSchedulerStatus(null);
+      setRealScanOnlySchedulerStatus(null);
       setSchedulerError(isAppError(error) ? error.message : "Khong tai duoc trang thai auto trading.");
     }
   }, [schedulerAccountMode]);
@@ -1121,6 +1107,7 @@ export function AutoTradingClient() {
       const [response, recent] = await Promise.all([fetchRealRecommendationsLatest(), fetchRealRecommendationsRecent(10)]);
       setRealRecommendations(response.recommendations ?? []);
       setRealRejectedRecommendations(response.rejected_recommendations ?? []);
+      setRealWatchCandidates(response.watch_candidates ?? []);
       setRealMailSignalRecommendations(response.mail_signal_recommendations ?? []);
       setRealRecommendationsGeneratedAt(response.generated_at ?? null);
       const scanned = Number(response.scanned ?? 0);
@@ -1131,6 +1118,7 @@ export function AutoTradingClient() {
     } catch (error) {
       setRealRecommendations([]);
       setRealRejectedRecommendations([]);
+      setRealWatchCandidates([]);
       setRealMailSignalRecommendations([]);
       setRealRecommendationsGeneratedAt(null);
       setRealRecommendationsScannedCount(null);
@@ -1292,6 +1280,7 @@ export function AutoTradingClient() {
       });
       setRealRecommendations(response.recommendations ?? []);
       setRealRejectedRecommendations(response.rejected_recommendations ?? []);
+      setRealWatchCandidates(response.watch_candidates ?? []);
       setRealMailSignalRecommendations(response.mail_signal_recommendations ?? []);
       setRealRecommendationsGeneratedAt(response.generated_at ?? null);
       const scanned = Number(response.scanned ?? 0);
@@ -1301,7 +1290,7 @@ export function AutoTradingClient() {
       setRealRecommendationsRecentLogs(recent);
       setRealRecommendationsError("");
       showToast(
-        `Da luu short-term=${Number(response.short_term_count ?? response.count ?? 0)}, mail=${Number(response.mail_signal_count ?? 0)}.`,
+        `Da luu short-term=${Number(response.short_term_count ?? response.count ?? 0)}, watch=${Number(response.watch_count ?? 0)}, mail=${Number(response.mail_signal_count ?? 0)}.`,
         "success",
       );
     } catch (error) {
@@ -1449,6 +1438,29 @@ export function AutoTradingClient() {
     loadSchedulerStatus,
     schedulerAccountMode,
     schedulerStatus?.interval_minutes,
+  ]);
+
+  useEffect(() => {
+    if (accountTab !== "real" || realAutomationMode !== "SCAN_ONLY" || !realScanOnlyScheduleActive) {
+      return;
+    }
+    const pollSeconds = Math.min(60, Math.max(15, Number(realScanOnlySchedulerStatus?.poll_seconds ?? 30)));
+    const tick = () => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") {
+        return;
+      }
+      void loadSchedulerStatus();
+      void loadRealRecommendations();
+    };
+    const id = window.setInterval(tick, pollSeconds * 1000);
+    return () => window.clearInterval(id);
+  }, [
+    accountTab,
+    loadRealRecommendations,
+    loadSchedulerStatus,
+    realAutomationMode,
+    realScanOnlyScheduleActive,
+    realScanOnlySchedulerStatus?.poll_seconds,
   ]);
 
   // FE no longer performs the scan-only schedule.
@@ -1688,7 +1700,8 @@ export function AutoTradingClient() {
           realScanOnlySchedulerToggleBusyRef.current = true;
           try {
             setSchedulerError("");
-            await toggleRealScanOnlyScheduler(desiredScanOnlyEnabled);
+            const updated = await toggleRealScanOnlyScheduler(desiredScanOnlyEnabled);
+            setRealScanOnlySchedulerStatus(updated);
             lastRealScanOnlyScheduleEnabledRef.current = desiredScanOnlyEnabled;
           } catch (error) {
             setSchedulerError(isAppError(error) ? error.message : "Khong toggle duoc schedule SCAN_ONLY tren BE.");
@@ -1706,12 +1719,13 @@ export function AutoTradingClient() {
         !realScanOnlySchedulerToggleBusyRef.current
       ) {
         realScanOnlySchedulerToggleBusyRef.current = true;
-        try {
-          setSchedulerError("");
-          await toggleRealScanOnlyScheduler(false);
-          lastRealScanOnlyScheduleEnabledRef.current = false;
-        } catch (error) {
-          setSchedulerError(isAppError(error) ? error.message : "Khong toggle duoc schedule SCAN_ONLY OFF tren BE.");
+      try {
+        setSchedulerError("");
+        const updated = await toggleRealScanOnlyScheduler(false);
+        setRealScanOnlySchedulerStatus(updated);
+        lastRealScanOnlyScheduleEnabledRef.current = false;
+      } catch (error) {
+        setSchedulerError(isAppError(error) ? error.message : "Khong toggle duoc schedule SCAN_ONLY OFF tren BE.");
         } finally {
           realScanOnlySchedulerToggleBusyRef.current = false;
         }
@@ -1905,7 +1919,10 @@ export function AutoTradingClient() {
               meta={`Session ${sessionActive ? "ACTIVE" : "NONE"}${realRecommendationsGeneratedAt ? ` | Scan ${formatDateTime(realRecommendationsGeneratedAt)}` : ""}`}
               action={
                 <>
-                  <RealStatusPill label="Scan schedule" active={realScanOnlyScheduleEnabled} />
+                  <RealStatusPill
+                    label="Scan schedule"
+                    active={realScanOnlyScheduleActive}
+                  />
                   <RealStatusPill label="Auto trading" active={Boolean(schedulerStatus?.enabled)} />
                   <button
                     type="button"
@@ -1992,12 +2009,17 @@ export function AutoTradingClient() {
             </div>
             {accountProbeMessage ? <p className="mt-3 text-xs text-slate-400">{accountProbeMessage}</p> : null}
             {schedulerError ? <p className="mt-3 text-xs text-rose-300">{schedulerError}</p> : null}
-            <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-6">
+            <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-7">
               <RealMetricCard label="Mode" value={realAutomationMode === "SCAN_ONLY" ? "Scan only" : "Auto trading"} tone="cyan" />
-              <RealMetricCard label="Scan schedule" value={realScanOnlyScheduleEnabled ? "ON" : "OFF"} tone={realScanOnlyScheduleEnabled ? "emerald" : "slate"} />
+              <RealMetricCard
+                label="Scan schedule"
+                value={realScanOnlyWorkerRunning ? "RUNNING" : realScanOnlyScheduleActive ? "ON" : "OFF"}
+                tone={realScanOnlyScheduleActive ? "emerald" : "slate"}
+              />
               <RealMetricCard label="Auto scheduler" value={schedulerStatus?.enabled ? "ON" : "OFF"} tone={schedulerStatus?.enabled ? "emerald" : "slate"} />
               <RealMetricCard label="Pending orders" value={realPendingOrders.length} tone={realPendingOrders.length > 0 ? "amber" : "slate"} />
               <RealMetricCard label="Short-term BUY" value={visibleRealRecommendations.length} tone="cyan" />
+              <RealMetricCard label="Watch" value={visibleRealWatchCandidates.length} tone="amber" />
               <RealMetricCard label="Mail / Liquidity" value={`${mailSignalPickCount} / ${liquidityEligibleTotal}`} tone="slate" />
             </div>
             <p className="mt-2 text-[11px] text-slate-500">
@@ -2404,6 +2426,27 @@ export function AutoTradingClient() {
                 </table>
               </div>
             )}
+            <div className="mt-3 rounded-md border border-amber-300/15 bg-amber-300/[0.04] p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs font-semibold text-amber-100">Watch candidates</p>
+                <p className="text-[11px] text-amber-200/70">{visibleRealWatchCandidates.length} scan rows</p>
+              </div>
+              {visibleRealWatchCandidates.length === 0 ? (
+                <p className="mt-2 text-[11px] text-slate-500">Chua co ma theo doi tu scan gate.</p>
+              ) : (
+                <div className="mt-2 max-h-44 overflow-y-auto text-[11px] font-mono text-slate-300">
+                  {visibleRealWatchCandidates.slice(0, 20).map((row, idx) => (
+                    <p key={`watch-${row.symbol}-${idx}`} className="border-b border-white/5 py-1">
+                      <span className="text-amber-200">{row.symbol}</span>
+                      {row.exchange ? <span className="text-slate-500">:{row.exchange}</span> : null} | scan:
+                      {String(row.scan_reason || "-")} | rr=
+                      {row.reward_risk == null ? "-" : Number(row.reward_risk || 0).toFixed(2)} | rsi=
+                      {row.rsi14 == null ? "-" : Number(row.rsi14 || 0).toFixed(1)} | {row.reason || "-"}
+                    </p>
+                  ))}
+                </div>
+              )}
+            </div>
             <div className="mt-3 rounded-md border border-white/10 bg-black/20 p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="text-xs font-semibold text-slate-300">Rejected recommendations</p>
@@ -2497,8 +2540,17 @@ export function AutoTradingClient() {
                   </span>
                 </p>
                 <p className="mt-1 text-slate-400">
+                  schedule=
+                  {realScanOnlyScheduleActive ? "ON" : "OFF"} | worker=
+                  {realScanOnlyWorkerRunning ? "RUNNING" : "STOPPED"} | on_grid=
+                  {realScanOnlySchedulerStatus?.on_grid ? "YES" : "NO"} | next=
+                  {realScanOnlySchedulerStatus?.next_grid_run_at
+                    ? formatDateTime(realScanOnlySchedulerStatus.next_grid_run_at)
+                    : "-"}
+                </p>
+                <p className="mt-1 text-slate-400">
                   last_scan_symbols={realRecommendationsScannedCount ?? "-"} | short_term_buy={visibleRealRecommendations.length} |
-                  mail_signal_buy={visibleRealMailSignalRecommendations.length}
+                  watch={visibleRealWatchCandidates.length} | mail_signal_buy={visibleRealMailSignalRecommendations.length}
                 </p>
                 <p className="mt-1 text-[10px] text-slate-500">
                   Pool ma dat chuan liquidity (tham khao bang tren, khong phai so ma scan): {liquidityEligibleTotal}
@@ -2528,7 +2580,7 @@ export function AutoTradingClient() {
                           |
                           <span className="text-cyan-200">{row.generated_at ? formatDateTime(row.generated_at) : "-"}</span> | scanned=
                           {Number(row.scanned || 0)} | short_term={Number(row.short_term_count ?? row.count ?? 0)} | mail=
-                          {Number(row.mail_signal_count ?? 0)}
+                          {Number(row.mail_signal_count ?? 0)} | watch={Number(row.watch_count ?? 0)}
                         </p>
                       ))}
                     </div>
@@ -2613,7 +2665,7 @@ export function AutoTradingClient() {
         <div className="flex flex-col gap-8">
           <section className="glass-panel rounded-2xl p-6">
             <div className="flex items-start justify-between gap-3">
-              <h2 className="text-lg font-semibold text-slate-100">{UI_TEXT.autoTrading.demoBalanceTitle}</h2>
+              <h2 className="text-lg font-semibold text-slate-100">Tong tai san demo (VND)</h2>
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
@@ -2634,9 +2686,39 @@ export function AutoTradingClient() {
               </div>
             </div>
             <p className="mt-2 text-3xl font-semibold tracking-tight text-cyan-100">
-              {formatVnd(demoCash)} VND
+              {formatVnd(demoOverviewTotalAssets)} VND
             </p>
-            <p className="mt-1 text-xs text-slate-500">{UI_TEXT.autoTrading.demoBalanceHint}</p>
+            <p className="mt-1 text-xs text-slate-500">
+              Tong tai san = tien mat kha dung + gia tri co phieu. Moi phien moi khoi tao 100.000.000 VND.
+            </p>
+            <form
+              className="mt-4 flex flex-wrap items-end gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void handleDepositDemoCash();
+              }}
+            >
+              <label className="flex min-w-64 flex-col gap-1 text-xs text-slate-400">
+                Nap them tien demo
+                <input
+                  type="number"
+                  min={0}
+                  step="1000000"
+                  className="rounded-md border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100"
+                  value={demoDepositAmount}
+                  onChange={(e) => setDemoDepositAmount(e.target.value)}
+                  disabled={demoDepositBusy || demoSessionBusy || !demoSessionId.trim()}
+                  placeholder="Vi du: 50000000"
+                />
+              </label>
+              <button
+                type="submit"
+                disabled={demoDepositBusy || demoSessionBusy || !demoSessionId.trim()}
+                className="rounded-md border border-emerald-300/40 px-3 py-2 text-xs font-semibold text-emerald-100 disabled:opacity-50"
+              >
+                {demoDepositBusy ? "Dang nap..." : "Nap tien"}
+              </button>
+            </form>
             <div className="mt-3 max-w-md">
               <label className="mb-1 block text-xs text-slate-400">{UI_TEXT.autoTrading.demoSessionListLabel}</label>
               <select
@@ -2671,35 +2753,42 @@ export function AutoTradingClient() {
             </div>
             <div className="mt-3 grid gap-2 text-xs text-slate-400 md:grid-cols-2">
               <p>Session: {demoSessionId}</p>
-              <p>Updated account snapshot: {formatVnd(demoCash)} VND</p>
+              <p>Cash snapshot tu /demo/account: {formatVnd(demoCash)} VND</p>
             </div>
             <div className="mt-4 rounded-md border border-white/10 bg-black/20 p-3 text-xs text-slate-300">
               <p className="font-semibold text-slate-200">Demo DB Overview</p>
               {demoOverviewError ? <p className="mt-2 text-rose-300">{demoOverviewError}</p> : null}
               {demoOverview ? (
-                <div className="mt-3 grid gap-2 md:grid-cols-2">
+                <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-5">
                   <div className="rounded-md border border-slate-300/20 bg-slate-300/10 p-3">
-                    <p className="text-[11px] uppercase tracking-wide text-slate-200/80">So tien nap vao</p>
+                    <p className="text-[11px] uppercase tracking-wide text-slate-200/80">Da nap</p>
                     <p className="mt-1 text-lg font-semibold text-slate-100">
-                      {formatVnd(Number(demoOverview.initial_balance || 0))} VND
+                      {formatVnd(demoOverviewInitialBalance)} VND
                     </p>
                   </div>
                   <div className="rounded-md border border-cyan-300/20 bg-cyan-300/5 p-3">
-                    <p className="text-[11px] uppercase tracking-wide text-cyan-100/80">Tong tien hien tai</p>
+                    <p className="text-[11px] uppercase tracking-wide text-cyan-100/80">Tong tai san</p>
                     <p className="mt-1 text-lg font-semibold text-cyan-100">
-                      {formatVnd(Number(demoOverview.total_assets || 0))} VND
+                      {formatVnd(demoOverviewTotalAssets)} VND
                     </p>
                   </div>
                   <div className="rounded-md border border-emerald-300/25 bg-emerald-300/10 p-3">
-                    <p className="text-[11px] uppercase tracking-wide text-emerald-100/80">Tien mat con du</p>
+                    <p className="text-[11px] uppercase tracking-wide text-emerald-100/80">Tien mat kha dung</p>
                     <p className="mt-1 text-lg font-semibold text-emerald-50">
-                      {formatVnd(demoPortfolioSnapshot.cashAvailable)} VND
+                      {formatVnd(demoOverviewCashAvailable)} VND
                     </p>
                   </div>
                   <div className="rounded-md border border-violet-300/25 bg-violet-300/10 p-3">
                     <p className="text-[11px] uppercase tracking-wide text-violet-100/80">Gia tri co phieu</p>
                     <p className="mt-1 text-lg font-semibold text-violet-50">
-                      {formatVnd(Number(demoOverview.stock_value || 0))} VND
+                      {formatVnd(demoOverviewStockValue)} VND
+                    </p>
+                  </div>
+                  <div className="rounded-md border border-amber-300/25 bg-amber-300/10 p-3">
+                    <p className="text-[11px] uppercase tracking-wide text-amber-100/80">Lai/lo tam tinh</p>
+                    <p className={`mt-1 text-lg font-semibold ${demoOverviewPnl >= 0 ? "text-emerald-100" : "text-rose-100"}`}>
+                      {demoOverviewPnl >= 0 ? "+" : ""}
+                      {formatVnd(demoOverviewPnl)} VND
                     </p>
                   </div>
                 </div>
@@ -2827,97 +2916,6 @@ export function AutoTradingClient() {
                 </table>
               </div>
             )}
-          </section>
-
-          <section className="glass-panel rounded-2xl p-6">
-            <h3 className="text-sm font-semibold text-slate-200">Strategy Cash Operations</h3>
-            <div className="mt-3 rounded-md border border-white/10 bg-black/25 p-3 text-xs text-slate-300">
-              <p className="mb-2 text-xs font-semibold text-slate-300">Transfer and allocate strategy cash</p>
-              <div className="mb-3 flex flex-wrap items-end gap-2">
-                <label className="flex flex-col gap-1 text-[11px] text-slate-400">
-                  To strategy
-                  <select
-                    className="rounded-md border border-white/15 bg-black/30 px-2 py-1.5 font-mono text-xs text-slate-100"
-                    value={strategyCashTransferTarget}
-                    onChange={(e) =>
-                      setStrategyCashTransferTarget(e.target.value as "SHORT_TERM" | "MAIL_SIGNAL" | "UNALLOCATED")
-                    }
-                    disabled={strategyCashTransferBusy}
-                  >
-                    <option value="SHORT_TERM">SHORT_TERM</option>
-                    <option value="MAIL_SIGNAL">MAIL_SIGNAL</option>
-                    <option value="UNALLOCATED">UNALLOCATED (Nap tu ben ngoai)</option>
-                  </select>
-                </label>
-                <label className="flex flex-col gap-1 text-[11px] text-slate-400">
-                  Amount (VND)
-                  <input
-                    type="number"
-                    min={0}
-                    step="1000"
-                    className="w-48 rounded-md border border-white/15 bg-black/30 px-2 py-1.5 text-xs text-slate-100"
-                    value={strategyCashTransferAmount}
-                    onChange={(e) => setStrategyCashTransferAmount(e.target.value)}
-                    disabled={strategyCashTransferBusy}
-                  />
-                </label>
-                <button
-                  type="button"
-                  onClick={() => void handleTransferUnallocatedCash()}
-                  disabled={strategyCashTransferBusy}
-                  className="rounded-md border border-cyan-300/40 px-3 py-2 text-xs font-semibold text-cyan-100 disabled:opacity-50"
-                >
-                  {strategyCashTransferBusy ? "Dang chuyen..." : "Them tien tu UNALLOCATED"}
-                </button>
-              </div>
-              <div className="mb-3 flex flex-wrap items-end gap-2">
-                <label className="flex flex-col gap-1 text-[11px] text-slate-400">
-                  From strategy
-                  <select
-                    className="rounded-md border border-white/15 bg-black/30 px-2 py-1.5 font-mono text-xs text-slate-100"
-                    value={strategyCashWithdrawSource}
-                    onChange={(e) => setStrategyCashWithdrawSource(e.target.value as "SHORT_TERM" | "MAIL_SIGNAL")}
-                    disabled={strategyCashTransferBusy}
-                  >
-                    <option value="SHORT_TERM">SHORT_TERM</option>
-                    <option value="MAIL_SIGNAL">MAIL_SIGNAL</option>
-                  </select>
-                </label>
-                <label className="flex flex-col gap-1 text-[11px] text-slate-400">
-                  Withdraw amount (VND)
-                  <input
-                    type="number"
-                    min={0}
-                    step="1000"
-                    className="w-48 rounded-md border border-white/15 bg-black/30 px-2 py-1.5 text-xs text-slate-100"
-                    value={strategyCashWithdrawAmount}
-                    onChange={(e) => setStrategyCashWithdrawAmount(e.target.value)}
-                    disabled={strategyCashTransferBusy}
-                  />
-                </label>
-                <button
-                  type="button"
-                  onClick={() => void handleWithdrawToUnallocated()}
-                  disabled={strategyCashTransferBusy}
-                  className="rounded-md border border-amber-300/40 px-3 py-2 text-xs font-semibold text-amber-100 disabled:opacity-50"
-                >
-                  {strategyCashTransferBusy ? "Dang rut..." : "Rut ve UNALLOCATED"}
-                </button>
-              </div>
-              <div className="grid gap-2 md:grid-cols-3">
-                {(demoOverview?.strategy_cash_overview || []).map((row) => (
-                  <div key={row.strategy_code} className="rounded-md border border-white/10 bg-black/20 p-2">
-                    <p className="text-[11px] uppercase tracking-wide text-slate-400">{row.strategy_code}</p>
-                    <p className="mt-1 text-sm font-semibold text-cyan-100">{formatVnd(Number(row.cash_value || 0))} VND</p>
-                    <p className="text-[11px] text-slate-500">Alloc: {(Number(row.allocation_pct || 0) * 100).toFixed(1)}%</p>
-                    <p className="text-[11px] text-amber-300">Used: {formatVnd(Number(row.used_cash_value || 0))} VND</p>
-                    <p className="text-[11px] text-emerald-300">
-                      Remaining: {formatVnd(Number(row.remaining_cash_value || 0))} VND
-                    </p>
-                  </div>
-                ))}
-              </div>
-            </div>
           </section>
 
           {schedulerError ? <p className="text-xs text-rose-300">{schedulerError}</p> : null}

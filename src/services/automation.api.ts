@@ -156,6 +156,27 @@ export interface RealRecommendationRow {
   metadata?: Record<string, unknown>;
 }
 
+export interface RealWatchCandidateRow {
+  symbol: string;
+  exchange?: string;
+  watch_status?: "WATCH" | string;
+  scan_reason?: string;
+  reason?: string;
+  entry?: number;
+  take_profit?: number;
+  stop_loss?: number;
+  reward_risk?: number | null;
+  setup_type?: string | null;
+  momentum_5d_pct?: number;
+  rsi14?: number;
+  distance_from_ema20_pct?: number;
+  spike_ratio?: number;
+  composite?: number;
+  floor?: number;
+  daily_return_pct?: number;
+  detail?: Record<string, unknown>;
+}
+
 export interface ShortTermScanDiagnostics {
   skipped_insufficient_data?: number;
   skipped_low_liquidity?: number;
@@ -184,6 +205,8 @@ export interface RealRecommendationsData {
   all_short_term_recommendations?: RealRecommendationRow[];
   rejected_recommendations?: RealRecommendationRow[];
   rejected_count?: number;
+  watch_candidates?: RealWatchCandidateRow[];
+  watch_count?: number;
   mail_signal_recommendations?: RealRecommendationRow[];
   mail_signal_count?: number;
   scan_diagnostics?: ShortTermScanDiagnostics | null;
@@ -247,9 +270,9 @@ export async function toggleScheduler(accountMode: "REAL" | "DEMO", enabled: boo
   }
 }
 
-export async function toggleRealScanOnlyScheduler(enabled: boolean): Promise<Record<string, unknown>> {
+export async function toggleRealScanOnlyScheduler(enabled: boolean): Promise<SchedulerStatus & { mode?: string }> {
   try {
-    const response = await httpClient.post<Record<string, unknown>>("/automation/scheduler/real-scan-only/toggle", {
+    const response = await httpClient.post<SchedulerStatus & { mode?: string }>("/automation/scheduler/real-scan-only/toggle", {
       enabled,
     });
     return response.data;

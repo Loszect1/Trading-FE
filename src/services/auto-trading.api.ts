@@ -93,14 +93,6 @@ export interface DemoHoldingOverviewItem {
   opened_at: string;
 }
 
-export interface DemoStrategyCashOverviewItem {
-  strategy_code: "SHORT_TERM" | "MAIL_SIGNAL" | "UNALLOCATED";
-  allocation_pct: number;
-  cash_value: number;
-  used_cash_value: number;
-  remaining_cash_value: number;
-}
-
 export interface DemoSessionOverviewData {
   session_id: string;
   is_active: boolean;
@@ -113,15 +105,15 @@ export interface DemoSessionOverviewData {
   holdings_count: number;
   holdings: DemoHoldingOverviewItem[];
   tp_slot_pct: number;
-  strategy_cash_overview: DemoStrategyCashOverviewItem[];
   created_at: string;
   updated_at: string;
 }
 
-export interface DemoStrategyCashTransferBody {
-  from_strategy?: "UNALLOCATED" | "SHORT_TERM" | "MAIL_SIGNAL";
-  to_strategy: "SHORT_TERM" | "MAIL_SIGNAL" | "UNALLOCATED";
+export interface DemoDepositData {
+  session_id: string;
   amount_vnd: number;
+  initial_balance: number;
+  cash_balance: number;
 }
 
 export async function createNewDemoSession(): Promise<string> {
@@ -228,19 +220,17 @@ export async function fetchDemoOverview(sessionId: string): Promise<DemoSessionO
   }
 }
 
-export async function transferDemoStrategyCash(
-  sessionId: string,
-  body: DemoStrategyCashTransferBody,
-): Promise<{ session_id: string; transferred_to: "SHORT_TERM" | "MAIL_SIGNAL" | "UNALLOCATED"; amount_vnd: number }> {
+export async function depositDemoCash(sessionId: string, amountVnd: number): Promise<DemoDepositData> {
   try {
-    const response = await httpClient.post<{
-      success: boolean;
-      data: { session_id: string; transferred_to: "SHORT_TERM" | "MAIL_SIGNAL" | "UNALLOCATED"; amount_vnd: number };
-    }>("/auto-trading/demo/strategy-cash/transfer", body, {
-      headers: {
-        "X-Demo-Session-Id": sessionId,
+    const response = await httpClient.post<{ success: boolean; data: DemoDepositData }>(
+      "/auto-trading/demo/deposit",
+      { amount_vnd: amountVnd },
+      {
+        headers: {
+          "X-Demo-Session-Id": sessionId,
+        },
       },
-    });
+    );
     return response.data.data;
   } catch (error) {
     throw normalizeError(error);
