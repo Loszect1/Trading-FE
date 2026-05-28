@@ -234,6 +234,8 @@ export interface LiquidityEligibleCacheRow {
   spike_ratio: number;
   eligible_liquidity: boolean;
   eligible_spike: boolean;
+  regular_liquidity?: boolean | null;
+  liquidity_detail?: Record<string, unknown>;
   redis_key: string;
 }
 
