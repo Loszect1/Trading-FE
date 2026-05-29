@@ -151,6 +151,13 @@ interface DnseHoldingSummaryRow {
   marketPrice: number | null;
 }
 
+interface RealActionBuyModalState {
+  row: RealRecommendationRow;
+  priceInput: string;
+  quantityInput: string;
+  error: string;
+}
+
 const STATUS_COLOR_CLASS = {
   order: {
     FILLED: "text-emerald-300",
@@ -194,6 +201,19 @@ function formatPrice(n: number): string {
     return "-";
   }
   return new Intl.NumberFormat("vi-VN", { maximumFractionDigits: 2 }).format(normalized);
+}
+
+function parseNumericInput(value: string): number {
+  const normalized = value.replace(/[,\s]/g, "");
+  const n = Number(normalized);
+  return Number.isFinite(n) ? n : Number.NaN;
+}
+
+function maxBoardLotQuantity(availableCash: number, price: number): number {
+  if (!Number.isFinite(availableCash) || !Number.isFinite(price) || availableCash <= 0 || price <= 0) {
+    return 0;
+  }
+  return Math.floor(availableCash / price / 100) * 100;
 }
 
 function formatDateTime(iso: string): string {
@@ -639,6 +659,7 @@ export function AutoTradingClient() {
   const [realRecommendationsBusy, setRealRecommendationsBusy] = useState(false);
   const [realRecommendationsError, setRealRecommendationsError] = useState("");
   const [realRecommendationBuyBusySymbol, setRealRecommendationBuyBusySymbol] = useState("");
+  const [realActionBuyModal, setRealActionBuyModal] = useState<RealActionBuyModalState | null>(null);
   const [realPendingOrders, setRealPendingOrders] = useState<CoreOrderRow[]>([]);
   const [realPendingOrdersBusy, setRealPendingOrdersBusy] = useState(false);
   const [realPendingOrdersError, setRealPendingOrdersError] = useState("");
@@ -844,6 +865,27 @@ export function AutoTradingClient() {
     () => (realRecommendationsFresh ? realMailSignalRecommendations : []),
     [realMailSignalRecommendations, realRecommendationsFresh],
   );
+  const realActionBuyAvailableCash = Number(dnseAccountSummary?.tradableCash ?? 0);
+  const realActionBuyOrderPrice = useMemo(() => {
+    if (!realActionBuyModal) {
+      return Number.NaN;
+    }
+    return normalizeVnStockPrice(parseNumericInput(realActionBuyModal.priceInput));
+  }, [realActionBuyModal]);
+  const realActionBuyQuantity = useMemo(() => {
+    if (!realActionBuyModal) {
+      return Number.NaN;
+    }
+    return Math.trunc(parseNumericInput(realActionBuyModal.quantityInput));
+  }, [realActionBuyModal]);
+  const realActionBuyMaxQuantity = useMemo(
+    () => maxBoardLotQuantity(realActionBuyAvailableCash, realActionBuyOrderPrice),
+    [realActionBuyAvailableCash, realActionBuyOrderPrice],
+  );
+  const realActionBuyNotional =
+    Number.isFinite(realActionBuyOrderPrice) && Number.isFinite(realActionBuyQuantity)
+      ? realActionBuyOrderPrice * realActionBuyQuantity
+      : 0;
   const dnsePortfolioMarketValue = useMemo(() => {
     return (dnseAccountSummary?.holdings ?? []).reduce((total, row) => {
       const price = Number(row.marketPrice ?? row.averagePrice ?? 0);
@@ -1303,42 +1345,85 @@ export function AutoTradingClient() {
   }, [dnseAccountSummary?.tradableCash, showToast]);
 
   const handleActionBuyRealRecommendation = useCallback(
-    async (row: RealRecommendationRow) => {
-      const confirmed = window.confirm(
-        `Xac nhan Action Buy?\nSymbol: ${row.symbol}\nEntry: ${formatPrice(row.entry)}\nTP: ${formatPrice(row.take_profit)}\nSL: ${formatPrice(row.stop_loss)}`,
-      );
-      if (!confirmed) {
-        return;
-      }
-      const availableCash = Number(dnseAccountSummary?.tradableCash ?? 0);
+    (row: RealRecommendationRow) => {
+      const availableCash = realActionBuyAvailableCash;
       if (!Number.isFinite(availableCash) || availableCash <= 0) {
         const message = "Khong tim thay available cash REAL. Vui long tai lai thong tin tai khoan DNSE.";
         setRealRecommendationsError(message);
         showToast(message, "error");
         return;
       }
-      setRealRecommendationBuyBusySymbol(row.symbol);
-      try {
-        const response = await postRealRecommendationActionBuy({
-          ...row,
-          available_cash_vnd: availableCash,
-        });
-        const success = Boolean((response as { success?: boolean }).success);
-        if (!success) {
-          const reason = String(((response as { data?: { reason?: string } }).data?.reason ?? "action_buy_rejected"));
-          throw new Error(reason);
-        }
-        showToast(`Da gui lenh BUY cho ${row.symbol}.`, "success");
-        await loadRealPendingOrders();
-      } catch (error) {
-        const message = isAppError(error) ? error.message : `Action Buy that bai cho ${row.symbol}.`;
-        setRealRecommendationsError(message);
-        showToast(message, "error");
-      } finally {
-        setRealRecommendationBuyBusySymbol("");
-      }
+      const defaultPrice = normalizeVnStockPrice(Number(row.entry || 0));
+      const cashMaxQuantity = maxBoardLotQuantity(availableCash, defaultPrice);
+      const suggestedQuantity = Math.floor(Number(row.suggested_quantity || 0) / 100) * 100;
+      const defaultQuantity =
+        suggestedQuantity >= 100 && cashMaxQuantity >= 100 ? Math.min(suggestedQuantity, cashMaxQuantity) : 0;
+      setRealActionBuyModal({
+        row,
+        priceInput: defaultPrice > 0 ? String(defaultPrice) : "",
+        quantityInput: defaultQuantity >= 100 ? String(defaultQuantity) : "",
+        error: "",
+      });
     },
-    [dnseAccountSummary?.tradableCash, loadRealPendingOrders, showToast],
+    [realActionBuyAvailableCash, showToast],
+  );
+
+  const handleSubmitRealActionBuy = useCallback(async () => {
+    if (!realActionBuyModal) {
+      return;
+    }
+    const row = realActionBuyModal.row;
+    const availableCash = realActionBuyAvailableCash;
+    const orderPrice = normalizeVnStockPrice(parseNumericInput(realActionBuyModal.priceInput));
+    const quantityRaw = parseNumericInput(realActionBuyModal.quantityInput);
+    const quantity = Math.trunc(quantityRaw);
+    const maxQuantity = maxBoardLotQuantity(availableCash, orderPrice);
+    const fail = (message: string) => {
+      setRealActionBuyModal((current) => (current ? { ...current, error: message } : current));
+      showToast(message, "error");
+    };
+    if (!Number.isFinite(availableCash) || availableCash <= 0) {
+      fail("Khong tim thay available cash REAL. Vui long tai lai thong tin tai khoan DNSE.");
+      return;
+    }
+    if (!Number.isFinite(orderPrice) || orderPrice <= 0) {
+      fail("Nhap gia mua hop le.");
+      return;
+    }
+    if (!Number.isFinite(quantityRaw) || !Number.isInteger(quantityRaw) || quantity < 100 || quantity % 100 !== 0) {
+      fail("So luong mua phai la boi so 100 va toi thieu 100 cp.");
+      return;
+    }
+    if (quantity > maxQuantity) {
+      fail(`So luong vuot max theo tien kha dung (${formatVnd(maxQuantity)} cp).`);
+      return;
+    }
+    setRealRecommendationBuyBusySymbol(row.symbol);
+    try {
+      const response = await postRealRecommendationActionBuy({
+        ...row,
+        available_cash_vnd: availableCash,
+        order_price: orderPrice,
+        quantity,
+      });
+      const success = Boolean((response as { success?: boolean }).success);
+      if (!success) {
+        const reason = String(((response as { data?: { reason?: string } }).data?.reason ?? "action_buy_rejected"));
+        throw new Error(reason);
+      }
+      setRealActionBuyModal(null);
+      showToast(`Da gui lenh BUY ${row.symbol} (${formatVnd(quantity)} cp @ ${formatPrice(orderPrice)}).`, "success");
+      await loadRealPendingOrders();
+    } catch (error) {
+      const message = isAppError(error) ? error.message : `Action Buy that bai cho ${row.symbol}.`;
+      setRealActionBuyModal((current) => (current ? { ...current, error: message } : current));
+      setRealRecommendationsError(message);
+      showToast(message, "error");
+    } finally {
+      setRealRecommendationBuyBusySymbol("");
+    }
+    },
+    [loadRealPendingOrders, realActionBuyAvailableCash, realActionBuyModal, showToast],
   );
 
   useEffect(() => {
@@ -1813,8 +1898,136 @@ export function AutoTradingClient() {
     };
   }, [demoOverview]);
 
+  const realActionBuyBusy = Boolean(realActionBuyModal && realRecommendationBuyBusySymbol === realActionBuyModal.row.symbol);
+  const realActionBuySubmitDisabled =
+    !realActionBuyModal ||
+    realActionBuyBusy ||
+    !Number.isFinite(realActionBuyOrderPrice) ||
+    realActionBuyOrderPrice <= 0 ||
+    !Number.isFinite(realActionBuyQuantity) ||
+    realActionBuyQuantity < 100 ||
+    realActionBuyQuantity % 100 !== 0 ||
+    realActionBuyQuantity > realActionBuyMaxQuantity;
+
   return (
     <div className="flex flex-col gap-8">
+      {realActionBuyModal ? (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+          <button
+            type="button"
+            className="absolute inset-0 bg-black/65 backdrop-blur-sm disabled:cursor-wait"
+            onClick={() => setRealActionBuyModal(null)}
+            disabled={realActionBuyBusy}
+            aria-label="Dong Action Buy"
+          />
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="real-action-buy-title"
+            className="relative z-[101] w-full max-w-lg overflow-hidden rounded-xl border border-white/10 bg-[#080c14] shadow-2xl"
+          >
+            <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
+              <div>
+                <h2 id="real-action-buy-title" className="text-base font-semibold text-slate-100">
+                  Action Buy {realActionBuyModal.row.symbol}
+                </h2>
+                <p className="mt-1 text-xs text-slate-500">
+                  TP {formatPrice(realActionBuyModal.row.take_profit)} | SL {formatPrice(realActionBuyModal.row.stop_loss)}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setRealActionBuyModal(null)}
+                disabled={realActionBuyBusy}
+                className="rounded-md border border-white/20 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:bg-white/10 disabled:opacity-50"
+              >
+                Dong
+              </button>
+            </div>
+            <div className="space-y-4 p-4">
+              <div className="grid gap-3 text-xs sm:grid-cols-3">
+                <div className="rounded-md border border-white/10 bg-black/20 p-3">
+                  <p className="text-slate-500">Available</p>
+                  <p className="mt-1 font-mono text-sm text-emerald-200">{formatVnd(realActionBuyAvailableCash)} VND</p>
+                </div>
+                <div className="rounded-md border border-white/10 bg-black/20 p-3">
+                  <p className="text-slate-500">Max amount</p>
+                  <p className="mt-1 font-mono text-sm text-cyan-200">{formatVnd(realActionBuyMaxQuantity)} cp</p>
+                </div>
+                <div className="rounded-md border border-white/10 bg-black/20 p-3">
+                  <p className="text-slate-500">Notional</p>
+                  <p className="mt-1 font-mono text-sm text-slate-100">{formatVnd(Math.max(0, realActionBuyNotional))} VND</p>
+                </div>
+              </div>
+              <label className="block text-xs font-semibold text-slate-300">
+                Price
+                <input
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  value={realActionBuyModal.priceInput}
+                  onChange={(e) =>
+                    setRealActionBuyModal((current) =>
+                      current ? { ...current, priceInput: e.target.value, error: "" } : current,
+                    )
+                  }
+                  className="mt-1 w-full rounded-md border border-white/15 bg-black/30 px-3 py-2 font-mono text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-cyan-300/60 focus:ring-2 focus:ring-cyan-300/20"
+                  placeholder="27500"
+                />
+              </label>
+              <label className="block text-xs font-semibold text-slate-300">
+                Amount
+                <div className="mt-1 flex gap-2">
+                  <input
+                    type="number"
+                    min="100"
+                    step="100"
+                    value={realActionBuyModal.quantityInput}
+                    onChange={(e) =>
+                      setRealActionBuyModal((current) =>
+                        current ? { ...current, quantityInput: e.target.value, error: "" } : current,
+                      )
+                    }
+                    className="min-w-0 flex-1 rounded-md border border-white/15 bg-black/30 px-3 py-2 font-mono text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-cyan-300/60 focus:ring-2 focus:ring-cyan-300/20"
+                    placeholder="100"
+                  />
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setRealActionBuyModal((current) =>
+                        current ? { ...current, quantityInput: String(realActionBuyMaxQuantity), error: "" } : current,
+                      )
+                    }
+                    disabled={realActionBuyMaxQuantity < 100 || realActionBuyBusy}
+                    className="shrink-0 rounded-md border border-cyan-300/40 px-3 text-xs font-semibold text-cyan-100 disabled:opacity-50"
+                  >
+                    Max
+                  </button>
+                </div>
+              </label>
+              {realActionBuyModal.error ? <p className="text-xs text-rose-300">{realActionBuyModal.error}</p> : null}
+              <div className="flex justify-end gap-2 border-t border-white/10 pt-4">
+                <button
+                  type="button"
+                  onClick={() => setRealActionBuyModal(null)}
+                  disabled={realActionBuyBusy}
+                  className="rounded-md border border-white/15 px-3 py-2 text-xs font-semibold text-slate-200 disabled:opacity-50"
+                >
+                  Huy
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleSubmitRealActionBuy()}
+                  disabled={realActionBuySubmitDisabled}
+                  className="rounded-md border border-emerald-300/40 bg-emerald-300/10 px-4 py-2 text-xs font-semibold text-emerald-100 transition hover:bg-emerald-300/20 disabled:opacity-50"
+                >
+                  {realActionBuyBusy ? "Dang mua..." : "Buy"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
       <div className="flex flex-wrap gap-2 border-b border-white/10 pb-3">
         <button
           type="button"
@@ -2413,7 +2626,8 @@ export function AutoTradingClient() {
                               !sessionActive ||
                               String(item.risk_status || "").toUpperCase() === "REJECTED" ||
                               realRecommendationBuyBusySymbol === item.symbol ||
-                              !Number.isFinite(Number(dnseAccountSummary?.tradableCash ?? 0))
+                              !Number.isFinite(realActionBuyAvailableCash) ||
+                              realActionBuyAvailableCash <= 0
                             }
                             className="rounded-md border border-emerald-300/40 px-2.5 py-1.5 text-[11px] font-semibold text-emerald-100 disabled:opacity-50"
                           >

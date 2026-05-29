@@ -224,6 +224,8 @@ export interface RealRecommendationScanRequest {
 
 export interface RealRecommendationActionBuyRequest extends RealRecommendationRow {
   available_cash_vnd: number;
+  order_price?: number;
+  quantity?: number;
 }
 
 export interface LiquidityEligibleCacheRow {
