@@ -67,7 +67,7 @@ export interface MonitoringTradingKpis {
   kpis_error?: string;
 }
 
-export interface ClaudeRuntimeMetrics {
+export interface GptRuntimeMetrics {
   cache_hit: number;
   cache_miss: number;
   request_success: number;
@@ -79,8 +79,10 @@ export interface ClaudeRuntimeMetrics {
 }
 
 export interface MonitoringAiRuntime {
-  claude_signal_scoring: ClaudeRuntimeMetrics;
-  claude_experience: ClaudeRuntimeMetrics;
+  gpt_signal_scoring?: GptRuntimeMetrics;
+  gpt_experience?: GptRuntimeMetrics;
+  claude_signal_scoring?: GptRuntimeMetrics;
+  claude_experience?: GptRuntimeMetrics;
 }
 
 export interface MonitoringAlertLogRow {

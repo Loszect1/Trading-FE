@@ -18,7 +18,7 @@ import {
 } from "@/services/trading-core.api";
 import type {
   AccountMode,
-  ClaudeRuntimeMetrics,
+  GptRuntimeMetrics,
   CorePositionRow,
   CoreSettlementRow,
   MonitoringAlertLogRow,
@@ -246,9 +246,9 @@ function renderKpiBlock(kpis: MonitoringTradingKpis): ReactNode {
   );
 }
 
-function renderClaudeRuntimeLine(
+function renderGptRuntimeLine(
   label: string,
-  metrics: ClaudeRuntimeMetrics | undefined,
+  metrics: GptRuntimeMetrics | undefined,
 ): ReactNode {
   if (!metrics) {
     return (
@@ -283,8 +283,14 @@ function renderAiRuntimeBlock(aiRuntime: MonitoringAiRuntime | undefined): React
   return (
     <div className="mt-4 space-y-2 border-t border-white/10 pt-3 text-sm text-slate-300">
       <p className="font-medium text-slate-200">{UI_TEXT.operations.summaryAiRuntimeTitle}</p>
-      {renderClaudeRuntimeLine(UI_TEXT.operations.summaryAiRuntimeScoring, aiRuntime.claude_signal_scoring)}
-      {renderClaudeRuntimeLine(UI_TEXT.operations.summaryAiRuntimeExperience, aiRuntime.claude_experience)}
+      {renderGptRuntimeLine(
+        UI_TEXT.operations.summaryAiRuntimeScoring,
+        aiRuntime.gpt_signal_scoring ?? aiRuntime.claude_signal_scoring,
+      )}
+      {renderGptRuntimeLine(
+        UI_TEXT.operations.summaryAiRuntimeExperience,
+        aiRuntime.gpt_experience ?? aiRuntime.claude_experience,
+      )}
     </div>
   );
 }

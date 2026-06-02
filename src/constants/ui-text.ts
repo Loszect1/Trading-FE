@@ -268,7 +268,7 @@ export const UI_TEXT = {
     summaryDrawdown: "Drawdown proxy",
     summaryKpiScope: "Phạm vi số liệu",
     summaryKpiError: "Lỗi tính KPI",
-    summaryAiRuntimeTitle: "Runtime AI Claude",
+    summaryAiRuntimeTitle: "Runtime AI GPT",
     summaryAiRuntimeScoring: "Signal scoring",
     summaryAiRuntimeExperience: "Experience analysis",
     summaryAiCache: "Cache hit/miss",
