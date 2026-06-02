@@ -16,6 +16,8 @@ import {
   getFinancialRatioSummary,
   getPriceHistory,
 } from "@/services/vnstock.api";
+import { fetchNewsBySymbol } from "@/services/news.api";
+import type { NewsMailImpact } from "@/types/news";
 import type {
   AiDataCompleteness,
   AiStructuredAnalysis,
@@ -32,6 +34,7 @@ type Interval = "1D" | "1W" | "1M" | "1Y";
 const intervals: Interval[] = ["1D", "1W", "1M", "1Y"];
 
 const chartRanges: ChartHistoryRange[] = ["3M", "1Y", "ALL"];
+const SYMBOL_NEWS_LIMIT = 12;
 
 function chartRangeLabel(range: ChartHistoryRange): string {
   if (range === "3M") {
@@ -41,6 +44,96 @@ function chartRangeLabel(range: ChartHistoryRange): string {
     return UI_TEXT.symbol.chartRange1Y;
   }
   return UI_TEXT.symbol.chartRangeAll;
+}
+
+function formatNewsScore(value: unknown): string {
+  const score = typeof value === "number" ? value : Number(value ?? 0);
+  if (!Number.isFinite(score)) {
+    return "0";
+  }
+  return score.toFixed(0);
+}
+
+function newsSentimentClass(label?: string | null): string {
+  const normalized = String(label ?? "").toLowerCase();
+  if (normalized === "positive") {
+    return "border-emerald-300/30 bg-emerald-300/10 text-emerald-100";
+  }
+  if (normalized === "negative") {
+    return "border-rose-300/30 bg-rose-300/10 text-rose-100";
+  }
+  if (normalized === "mixed") {
+    return "border-amber-300/30 bg-amber-300/10 text-amber-100";
+  }
+  return "border-slate-300/20 bg-white/5 text-slate-200";
+}
+
+function SymbolNewsCard({
+  item,
+  fallbackSymbol,
+}: {
+  item: NewsMailImpact;
+  fallbackSymbol: string;
+}) {
+  const title = item.title?.trim() || item.article_title?.trim() || `${fallbackSymbol} news`;
+  const meta = [item.source_host, item.run_date, item.category].filter(Boolean).join(" - ");
+  const summary = item.codex_summary?.trim() || item.article_excerpt?.trim() || "";
+  const rationale = item.rationale?.trim() || "";
+  const url = item.url?.trim() || "";
+  const body = (
+    <>
+      <div className="flex flex-wrap items-center gap-2">
+        <span
+          className={`inline-flex items-center rounded-md border px-2 py-1 text-[11px] font-semibold ${newsSentimentClass(
+            item.sentiment_label,
+          )}`}
+        >
+          {item.sentiment_label || "neutral"}
+        </span>
+        <span className="rounded-md bg-white/5 px-2 py-1 text-[11px] text-slate-400">
+          Impact {formatNewsScore(item.impact_score)}
+        </span>
+        <span className="rounded-md bg-white/5 px-2 py-1 text-[11px] text-slate-400">
+          Sentiment {formatNewsScore(item.sentiment_score)}
+        </span>
+        {item.impact_horizon ? (
+          <span className="rounded-md bg-white/5 px-2 py-1 text-[11px] text-slate-400">
+            {item.impact_horizon}
+          </span>
+        ) : null}
+      </div>
+      <p className="mt-3 text-sm font-semibold text-slate-100">{title}</p>
+      {meta ? <p className="mt-1 text-xs text-slate-400">{meta}</p> : null}
+      {summary ? (
+        <p className="mt-2 line-clamp-2 text-sm leading-6 text-slate-300">{summary}</p>
+      ) : null}
+      {rationale ? <p className="mt-2 text-xs leading-5 text-slate-400">{rationale}</p> : null}
+      {url ? (
+        <span className="mt-2 inline-block text-xs font-semibold text-cyan-200 group-hover:text-cyan-100">
+          {UI_TEXT.symbol.readMore}
+        </span>
+      ) : null}
+    </>
+  );
+
+  if (url) {
+    return (
+      <a
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="group block rounded-lg border border-cyan-300/20 bg-cyan-300/[0.06] p-3 outline-none transition hover:border-cyan-300/40 hover:bg-cyan-300/[0.09] focus-visible:ring-2 focus-visible:ring-cyan-400/50"
+      >
+        {body}
+      </a>
+    );
+  }
+
+  return (
+    <article className="rounded-lg border border-cyan-300/20 bg-cyan-300/[0.06] p-3">
+      {body}
+    </article>
+  );
 }
 
 function normalizeHeading(value: string): string {
@@ -424,6 +517,8 @@ export function SymbolDetailClient({
   const [overview, setOverview] = useState<CompanyOverview | null>(initialOverview);
   const [chartData, setChartData] = useState<CandlePoint[]>(initialChartData);
   const [news, setNews] = useState<CompanyNewsItem[]>([]);
+  const [symbolNews, setSymbolNews] = useState<NewsMailImpact[]>([]);
+  const [symbolNewsLoading, setSymbolNewsLoading] = useState(false);
   const [ratioSummary, setRatioSummary] = useState<FinancialRatioPoint[]>([]);
   const [ratioPeriod, setRatioPeriod] = useState<FinancialRatioPeriod>("year");
   const [ratioLoading, setRatioLoading] = useState(false);
@@ -452,9 +547,11 @@ export function SymbolDetailClient({
   useEffect(() => {
     let isCancelled = false;
     async function loadOverviewAndNews() {
-      const [overviewResult, newsResult] = await Promise.allSettled([
+      setSymbolNewsLoading(true);
+      const [overviewResult, newsResult, symbolNewsResult] = await Promise.allSettled([
         getCompanyOverview(symbol),
         getCompanyNews(symbol),
+        fetchNewsBySymbol(symbol, SYMBOL_NEWS_LIMIT),
       ]);
 
       if (isCancelled) {
@@ -472,6 +569,13 @@ export function SymbolDetailClient({
       } else {
         setNews([]);
       }
+
+      if (symbolNewsResult.status === "fulfilled") {
+        setSymbolNews(symbolNewsResult.value.items ?? []);
+      } else {
+        setSymbolNews([]);
+      }
+      setSymbolNewsLoading(false);
     }
 
     void loadOverviewAndNews();
@@ -577,6 +681,8 @@ export function SymbolDetailClient({
       window.clearInterval(timer);
     };
   }, [chartRange, initialChartData.length, interval, showToast, symbol]);
+
+  const hasNewsItems = symbolNews.length > 0 || news.length > 0;
 
   return (
     <>
@@ -805,51 +911,80 @@ export function SymbolDetailClient({
 
       <section className="glass-panel rounded-xl p-6">
         <h2 className="text-lg font-semibold text-slate-100">{UI_TEXT.symbol.news}</h2>
-        {news.length === 0 ? (
+        {symbolNewsLoading && !hasNewsItems ? (
+          <p className="mt-3 text-sm text-slate-400">Loading news...</p>
+        ) : !hasNewsItems ? (
           <p className="mt-3 text-sm text-slate-400">{UI_TEXT.symbol.noNews}</p>
         ) : (
-          <div className="mt-4 space-y-3">
-            {news.map((item, index) => {
-              const meta = [item.source, item.published_at].filter(Boolean).join(" - ");
-              const key = `${item.title}-${index}`;
-              const body = (
-                <>
-                  <p className="text-sm font-semibold text-slate-100">{item.title}</p>
-                  {meta ? (
-                    <p className="mt-1 text-xs text-slate-400">{meta}</p>
-                  ) : null}
-                  {item.summary ? (
-                    <p className="mt-2 line-clamp-2 text-sm leading-6 text-slate-300">{item.summary}</p>
-                  ) : null}
-                  {item.url ? (
-                    <span className="mt-2 inline-block text-xs font-semibold text-cyan-200 group-hover:text-cyan-100">
-                      {UI_TEXT.symbol.readMore}
-                    </span>
-                  ) : null}
-                </>
-              );
-              if (item.url) {
-                return (
-                  <a
-                    key={key}
-                    href={item.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="group block rounded-lg border border-white/10 bg-slate-950/45 p-3 outline-none transition hover:border-cyan-300/35 hover:bg-slate-900/50 focus-visible:ring-2 focus-visible:ring-cyan-400/50"
-                  >
-                    {body}
-                  </a>
-                );
-              }
-              return (
-                <article
-                  key={key}
-                  className="rounded-lg border border-white/10 bg-slate-950/45 p-3"
-                >
-                  {body}
-                </article>
-              );
-            })}
+          <div className="mt-4 space-y-5">
+            {symbolNews.length > 0 ? (
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-cyan-200/80">
+                  News tab matches
+                </p>
+                <div className="mt-3 space-y-3">
+                  {symbolNews.map((item, index) => (
+                    <SymbolNewsCard
+                      key={`${item.impact_id ?? item.article_id ?? item.symbol}-${index}`}
+                      item={item}
+                      fallbackSymbol={symbol}
+                    />
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            {news.length > 0 ? (
+              <div>
+                {symbolNews.length > 0 ? (
+                  <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">
+                    Company feed
+                  </p>
+                ) : null}
+                <div className={symbolNews.length > 0 ? "mt-3 space-y-3" : "space-y-3"}>
+                  {news.map((item, index) => {
+                    const meta = [item.source, item.published_at].filter(Boolean).join(" - ");
+                    const key = `${item.title}-${index}`;
+                    const body = (
+                      <>
+                        <p className="text-sm font-semibold text-slate-100">{item.title}</p>
+                        {meta ? (
+                          <p className="mt-1 text-xs text-slate-400">{meta}</p>
+                        ) : null}
+                        {item.summary ? (
+                          <p className="mt-2 line-clamp-2 text-sm leading-6 text-slate-300">{item.summary}</p>
+                        ) : null}
+                        {item.url ? (
+                          <span className="mt-2 inline-block text-xs font-semibold text-cyan-200 group-hover:text-cyan-100">
+                            {UI_TEXT.symbol.readMore}
+                          </span>
+                        ) : null}
+                      </>
+                    );
+                    if (item.url) {
+                      return (
+                        <a
+                          key={key}
+                          href={item.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="group block rounded-lg border border-white/10 bg-slate-950/45 p-3 outline-none transition hover:border-cyan-300/35 hover:bg-slate-900/50 focus-visible:ring-2 focus-visible:ring-cyan-400/50"
+                        >
+                          {body}
+                        </a>
+                      );
+                    }
+                    return (
+                      <article
+                        key={key}
+                        className="rounded-lg border border-white/10 bg-slate-950/45 p-3"
+                      >
+                        {body}
+                      </article>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
           </div>
         )}
       </section>
