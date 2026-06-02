@@ -251,6 +251,18 @@ export interface LiquidityEligibleCacheResponse {
   };
 }
 
+export interface DemoPortfolioReviewRunData {
+  success: boolean;
+  run_id?: string;
+  run_status: string;
+  session_id?: string | null;
+  holdings_count: number;
+  applied_count: number;
+  skipped_count: number;
+  detail?: Record<string, unknown>;
+  error?: string | null;
+}
+
 export async function fetchSchedulerStatus(accountMode: "REAL" | "DEMO"): Promise<SchedulerStatus> {
   try {
     const response = await httpClient.get<SchedulerStatus>(
@@ -464,6 +476,20 @@ export async function postShortTermPostCloseRefreshRunOnce(): Promise<Record<str
       { timeout: API_NO_TIMEOUT_MS },
     );
     return response.data.data ?? {};
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function postDemoPortfolioReviewRunOnce(demoSessionId?: string): Promise<DemoPortfolioReviewRunData> {
+  try {
+    const body = demoSessionId?.trim() ? { demo_session_id: demoSessionId.trim() } : {};
+    const response = await httpClient.post<{ success: boolean; data: DemoPortfolioReviewRunData }>(
+      "/automation/demo-portfolio-review/run-once",
+      body,
+      { timeout: API_NO_TIMEOUT_MS },
+    );
+    return response.data.data;
   } catch (error) {
     throw normalizeError(error);
   }

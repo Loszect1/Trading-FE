@@ -49,6 +49,7 @@ import {
   fetchMailSignalEntryRunsRecent,
   fetchMailSignalsLatest,
   postMailSignalsRunOnce,
+  postDemoPortfolioReviewRunOnce,
   postShortTermPostCloseRefreshRunOnce,
   postRealRecommendationActionBuy,
   postRealRecommendationsScan,
@@ -740,6 +741,8 @@ export function AutoTradingClient() {
   const [, setDemoLog] = useState<string[]>([]);
   const [demoOverview, setDemoOverview] = useState<DemoSessionOverviewData | null>(null);
   const [demoOverviewError, setDemoOverviewError] = useState("");
+  const [demoPortfolioReviewBusy, setDemoPortfolioReviewBusy] = useState(false);
+  const [demoPortfolioReviewMessage, setDemoPortfolioReviewMessage] = useState("");
   const [demoDepositAmount, setDemoDepositAmount] = useState("");
   const [demoDepositBusy, setDemoDepositBusy] = useState(false);
   const [holdingLastPriceBySymbol, setHoldingLastPriceBySymbol] = useState<Record<string, number>>({});
@@ -1121,6 +1124,36 @@ export function AutoTradingClient() {
       setDemoDepositBusy(false);
     }
   }, [demoDepositAmount, demoSessionId, pushDemoLog, refreshDemoAccount, refreshDemoOverview, showToast]);
+
+  const handleManualDemoPortfolioReview = useCallback(async () => {
+    const sessionId = demoSessionId.trim();
+    if (!sessionId) {
+      setDemoOverviewError("Chua co demo session de overview.");
+      return;
+    }
+    setDemoPortfolioReviewBusy(true);
+    setDemoPortfolioReviewMessage("");
+    try {
+      const result = await postDemoPortfolioReviewRunOnce(sessionId);
+      const applied = Number(result.applied_count || 0);
+      const skipped = Number(result.skipped_count || 0);
+      const status = String(result.run_status || "-");
+      const message = `Manual overview ${status}: apply ${applied}, skip ${skipped}.`;
+      setDemoPortfolioReviewMessage(message);
+      setDemoOverviewError("");
+      pushDemoLog(message);
+      showToast(message, applied > 0 ? "success" : "info");
+      await refreshDemoOverview(sessionId);
+    } catch (error) {
+      const message = isAppError(error) ? error.message : "Manual overview demo portfolio that bai.";
+      setDemoPortfolioReviewMessage("");
+      setDemoOverviewError(message);
+      pushDemoLog(message);
+      showToast(message, "error");
+    } finally {
+      setDemoPortfolioReviewBusy(false);
+    }
+  }, [demoSessionId, pushDemoLog, refreshDemoOverview, showToast]);
 
   const loadSchedulerStatus = useCallback(async () => {
     try {
@@ -3139,7 +3172,20 @@ export function AutoTradingClient() {
           </section>
 
           <section className="glass-panel rounded-2xl p-6">
-            <h3 className="text-sm font-semibold text-slate-200">Danh muc demo session hien tai</h3>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <h3 className="text-sm font-semibold text-slate-200">Danh muc demo session hien tai</h3>
+              <button
+                type="button"
+                onClick={() => void handleManualDemoPortfolioReview()}
+                disabled={demoPortfolioReviewBusy || !demoSessionId.trim()}
+                className="h-8 rounded-md border border-cyan-300/40 px-3 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-300/10 disabled:opacity-50"
+              >
+                {demoPortfolioReviewBusy ? "Dang overview..." : "Manual overview"}
+              </button>
+            </div>
+            {demoPortfolioReviewMessage ? (
+              <p className="mt-2 text-[11px] text-emerald-300">{demoPortfolioReviewMessage}</p>
+            ) : null}
             {!demoOverview || demoOverview.holdings.length === 0 ? (
               <p className="mt-3 text-xs text-slate-500">Khong co ma dang nam giu trong demo session nay.</p>
             ) : (
