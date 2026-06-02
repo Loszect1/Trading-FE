@@ -165,13 +165,20 @@ export async function deleteCurrentDemoSession(sessionId: string): Promise<strin
 
 export async function fetchDemoAccount(
   sessionId: string,
-  options?: { historyLimit?: number; historyOffset?: number },
+  options?: { historyLimit?: number; historyOffset?: number; historySide?: DemoTradeSide },
 ): Promise<DemoAccountData> {
   try {
     const historyLimit = options?.historyLimit ?? 50;
     const historyOffset = options?.historyOffset ?? 0;
+    const params = new URLSearchParams({
+      history_limit: String(historyLimit),
+      history_offset: String(historyOffset),
+    });
+    if (options?.historySide) {
+      params.set("history_side", options.historySide);
+    }
     const response = await httpClient.get<{ success: boolean; data: DemoAccountData }>(
-      `/auto-trading/demo/account?history_limit=${encodeURIComponent(historyLimit)}&history_offset=${encodeURIComponent(historyOffset)}`,
+      `/auto-trading/demo/account?${params.toString()}`,
       {
         headers: {
           "X-Demo-Session-Id": sessionId,

@@ -37,7 +37,9 @@ import {
   createNewDemoSession,
   fetchDemoAccount,
   fetchDemoSessions,
+  type DemoAccountData,
   type DemoSessionOverviewData,
+  type DemoTradeSide,
 } from "@/services/auto-trading.api";
 import {
   fetchRealRecommendationsLatest,
@@ -86,6 +88,7 @@ type AccountTab = "real" | "demo";
 
 type RealAutomationMode = "SCAN_ONLY" | "AUTO_TRADING";
 type RealLogsTab = "SCAN_ONLY" | "AUTO_TRADING";
+type DemoOrdersTab = "buy" | "sell";
 
 const DEMO_INITIAL_CASH_VND = 100_000_000;
 const AUTO_TRADING_BACKEND_LOGS_PER_SCOPE = 5;
@@ -93,6 +96,19 @@ const DNSE_DEPOSIT_QR_URL = (process.env.NEXT_PUBLIC_DNSE_DEPOSIT_QR_URL ?? "/QR
 
 const REAL_AUTOMATION_MODE_STORAGE_KEY = "real_automation_mode";
 const REAL_SCAN_ONLY_SCHEDULE_ENABLED_STORAGE_KEY = "real_scan_only_schedule_enabled";
+const DEMO_ORDER_TABS: DemoOrdersTab[] = ["buy", "sell"];
+const DEMO_ORDER_TAB_SIDE: Record<DemoOrdersTab, DemoTradeSide> = {
+  buy: "BUY",
+  sell: "SELL",
+};
+
+function emptyDemoOrdersBySide(): Record<DemoOrdersTab, DemoOrderItem[]> {
+  return { buy: [], sell: [] };
+}
+
+function emptyDemoHistoryCounts(): Record<DemoOrdersTab, number> {
+  return { buy: 0, sell: 0 };
+}
 
 function formatShortTermScanDiagnostics(d: ShortTermScanDiagnostics | null | undefined): string {
   if (!d || typeof d !== "object") {
@@ -136,6 +152,18 @@ interface DemoOrderItem {
   quantity: number;
   price: number;
   notional: number;
+}
+
+function mapDemoOrderHistory(account: DemoAccountData): DemoOrderItem[] {
+  return account.trade_history.map((item) => ({
+    id: item.trade_id,
+    createdAt: item.created_at,
+    symbol: item.symbol,
+    side: item.side === "BUY" ? "buy" : "sell",
+    quantity: item.quantity,
+    price: item.price,
+    notional: item.notional,
+  }));
 }
 
 interface DemoPortfolioSnapshot {
@@ -696,10 +724,17 @@ export function AutoTradingClient() {
   const [demoCash, setDemoCash] = useState(DEMO_INITIAL_CASH_VND);
   const [, setDemoPositions] = useState<DemoPosition[]>([]);
   const [, setDemoUnrealizedPnl] = useState(0);
-  const [demoOrders, setDemoOrders] = useState<DemoOrderItem[]>([]);
-  const [historyOffset, setHistoryOffset] = useState(0);
+  const [demoOrdersTab, setDemoOrdersTab] = useState<DemoOrdersTab>("buy");
+  const [demoOrdersBySide, setDemoOrdersBySide] = useState<Record<DemoOrdersTab, DemoOrderItem[]>>(
+    emptyDemoOrdersBySide,
+  );
+  const [historyOffsetBySide, setHistoryOffsetBySide] = useState<Record<DemoOrdersTab, number>>(
+    emptyDemoHistoryCounts,
+  );
   const [historyLimit] = useState(30);
-  const [historyTotal, setHistoryTotal] = useState(0);
+  const [historyTotalBySide, setHistoryTotalBySide] = useState<Record<DemoOrdersTab, number>>(
+    emptyDemoHistoryCounts,
+  );
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
   const [demoSessionBusy, setDemoSessionBusy] = useState(false);
   const [, setDemoLog] = useState<string[]>([]);
@@ -952,38 +987,55 @@ export function AutoTradingClient() {
   }, []);
 
   const refreshDemoAccount = useCallback(
-    async (sessionId: string, options?: { append?: boolean; offset?: number }) => {
+    async (sessionId: string, options?: { append?: boolean; offset?: number; tab?: DemoOrdersTab }) => {
       try {
         const offset = options?.offset ?? 0;
-        const account = await fetchDemoAccount(sessionId, {
-          historyLimit,
-          historyOffset: offset,
-        });
-        setDemoCash(account.cash_balance);
-        setDemoPositions(account.positions);
-        setDemoUnrealizedPnl(account.unrealized_pnl);
-        setHistoryTotal(account.trade_history_total);
-        const mappedFromDemoTrades: DemoOrderItem[] = account.trade_history.map((item) => ({
-          id: item.trade_id,
-          createdAt: item.created_at,
-          symbol: item.symbol,
-          side: item.side === "BUY" ? "buy" : "sell",
-          quantity: item.quantity,
-          price: item.price,
-          notional: item.notional,
-        }));
-        setDemoOrders((prev) => {
-          if (options?.append) {
-            const existingIds = new Set(prev.map((item) => item.id));
-            const merged = [...prev];
+        const applyAccountSnapshot = (account: DemoAccountData) => {
+          setDemoCash(account.cash_balance);
+          setDemoPositions(account.positions);
+          setDemoUnrealizedPnl(account.unrealized_pnl);
+        };
+        if (options?.append) {
+          const tab = options.tab ?? "buy";
+          const account = await fetchDemoAccount(sessionId, {
+            historyLimit,
+            historyOffset: offset,
+            historySide: DEMO_ORDER_TAB_SIDE[tab],
+          });
+          applyAccountSnapshot(account);
+          const mappedFromDemoTrades = mapDemoOrderHistory(account);
+          setHistoryTotalBySide((prev) => ({ ...prev, [tab]: account.trade_history_total }));
+          setDemoOrdersBySide((prev) => {
+            const existingIds = new Set(prev[tab].map((item) => item.id));
+            const merged = [...prev[tab]];
             for (const row of mappedFromDemoTrades) {
               if (!existingIds.has(row.id)) {
                 merged.push(row);
               }
             }
-            return merged;
-          }
-          return mappedFromDemoTrades;
+            return { ...prev, [tab]: merged };
+          });
+          return;
+        }
+
+        const [buyAccount, sellAccount] = await Promise.all(
+          DEMO_ORDER_TABS.map((tab) =>
+            fetchDemoAccount(sessionId, {
+              historyLimit,
+              historyOffset: offset,
+              historySide: DEMO_ORDER_TAB_SIDE[tab],
+            }),
+          ),
+        );
+        applyAccountSnapshot(buyAccount);
+        setHistoryOffsetBySide({ buy: offset, sell: offset });
+        setHistoryTotalBySide({
+          buy: buyAccount.trade_history_total,
+          sell: sellAccount.trade_history_total,
+        });
+        setDemoOrdersBySide({
+          buy: mapDemoOrderHistory(buyAccount),
+          sell: mapDemoOrderHistory(sellAccount),
         });
       } catch (error) {
         const message = isAppError(error) ? error.message : "Khong tai duoc demo account.";
@@ -1462,7 +1514,7 @@ export function AutoTradingClient() {
         if (cancelled) {
           return;
         }
-        setHistoryOffset(0);
+        setHistoryOffsetBySide(emptyDemoHistoryCounts());
         await refreshDemoAccount(resolvedSessionId, { offset: 0 });
         await refreshDemoOverview(resolvedSessionId);
         await refreshDemoSessions();
@@ -1652,18 +1704,23 @@ export function AutoTradingClient() {
     void handleProbeAccount();
   }, [accountTab, accountProbeBusy, dnseAccountSummary, handleProbeAccount]);
 
+  const activeDemoOrders = demoOrdersBySide[demoOrdersTab];
+  const activeHistoryOffset = historyOffsetBySide[demoOrdersTab] ?? 0;
+  const activeHistoryTotal = historyTotalBySide[demoOrdersTab] ?? 0;
+
   const handleLoadMoreHistory = async () => {
-    const nextOffset = historyOffset + historyLimit;
+    const tab = demoOrdersTab;
+    const nextOffset = activeHistoryOffset + historyLimit;
     setHistoryLoadingMore(true);
     try {
-      await refreshDemoAccount(demoSessionId, { append: true, offset: nextOffset });
-      setHistoryOffset(nextOffset);
+      await refreshDemoAccount(demoSessionId, { append: true, offset: nextOffset, tab });
+      setHistoryOffsetBySide((prev) => ({ ...prev, [tab]: nextOffset }));
     } finally {
       setHistoryLoadingMore(false);
     }
   };
 
-  const canLoadMoreHistory = demoOrders.length < historyTotal;
+  const canLoadMoreHistory = activeDemoOrders.length < activeHistoryTotal;
   const handleNewDemoSession = async () => {
     setDemoSessionBusy(true);
     try {
@@ -1671,8 +1728,9 @@ export function AutoTradingClient() {
       window.localStorage.setItem(DEMO_SESSION_STORAGE_KEY, newSessionId);
       setDemoSessionId(newSessionId);
       await setSchedulerDemoSession(newSessionId);
-      setHistoryOffset(0);
-      setDemoOrders([]);
+      setHistoryOffsetBySide(emptyDemoHistoryCounts());
+      setHistoryTotalBySide(emptyDemoHistoryCounts());
+      setDemoOrdersBySide(emptyDemoOrdersBySide());
       setDemoLog([]);
       await refreshDemoAccount(newSessionId, { offset: 0 });
       await refreshDemoOverview(newSessionId);
@@ -1710,8 +1768,9 @@ export function AutoTradingClient() {
       window.localStorage.setItem(DEMO_SESSION_STORAGE_KEY, nextSessionId);
       setDemoSessionId(nextSessionId);
       await setSchedulerDemoSession(nextSessionId || null);
-      setHistoryOffset(0);
-      setDemoOrders([]);
+      setHistoryOffsetBySide(emptyDemoHistoryCounts());
+      setHistoryTotalBySide(emptyDemoHistoryCounts());
+      setDemoOrdersBySide(emptyDemoOrdersBySide());
       setDemoLog([]);
       setDemoPositions([]);
       setDemoUnrealizedPnl(0);
@@ -2945,7 +3004,9 @@ export function AutoTradingClient() {
                   window.localStorage.setItem(DEMO_SESSION_STORAGE_KEY, nextId);
                   setDemoSessionId(nextId);
                   void setSchedulerDemoSession(nextId);
-                  setHistoryOffset(0);
+                  setHistoryOffsetBySide(emptyDemoHistoryCounts());
+                  setHistoryTotalBySide(emptyDemoHistoryCounts());
+                  setDemoOrdersBySide(emptyDemoOrdersBySide());
                   void refreshDemoAccount(nextId, { offset: 0 });
                   void refreshDemoOverview(nextId);
                 }}
@@ -3155,14 +3216,36 @@ export function AutoTradingClient() {
           <div>
             <section className="glass-panel rounded-2xl p-6">
               <h3 className="text-sm font-semibold text-slate-200">{UI_TEXT.autoTrading.demoOrdersTitle}</h3>
+              <div className="mt-3 flex w-fit rounded-md border border-white/10 bg-black/20 p-1">
+                {DEMO_ORDER_TABS.map((tab) => {
+                  const active = demoOrdersTab === tab;
+                  const label = tab === "buy" ? "Buy" : "Sell";
+                  return (
+                    <button
+                      key={tab}
+                      type="button"
+                      aria-pressed={active}
+                      onClick={() => setDemoOrdersTab(tab)}
+                      className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${
+                        active
+                          ? "bg-cyan-300/20 text-cyan-50"
+                          : "text-slate-400 hover:bg-white/5 hover:text-slate-200"
+                      }`}
+                    >
+                      {label}
+                      <span className="ml-2 font-mono text-[10px] text-slate-400">{historyTotalBySide[tab] ?? 0}</span>
+                    </button>
+                  );
+                })}
+              </div>
               <p className="mt-1 text-xs text-slate-500">
-                Hien thi {demoOrders.length} / {historyTotal} lenh
+                Hien thi {activeDemoOrders.length} / {activeHistoryTotal} lenh {demoOrdersTab === "buy" ? "Buy" : "Sell"}
               </p>
-              {demoOrders.length === 0 ? (
+              {activeDemoOrders.length === 0 ? (
                 <p className="mt-3 text-xs text-slate-500">{UI_TEXT.autoTrading.demoOrdersEmpty}</p>
               ) : (
                 <div className="mt-3 max-h-64 overflow-y-auto text-xs text-slate-400">
-                  {demoOrders.map((o) => (
+                  {activeDemoOrders.map((o) => (
                     <div key={o.id} className="border-b border-white/5 py-2 font-mono">
                       <div>
                         {o.createdAt} {o.side.toUpperCase()} {o.quantity} {o.symbol} @ {formatPrice(o.price)}
