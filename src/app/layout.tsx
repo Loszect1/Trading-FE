@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { ChatbotWidget } from "@/components/chatbot-widget";
 import { ToastProvider } from "@/components/toast-provider";
 import { IBM_Plex_Mono, Manrope } from "next/font/google";
 import "./globals.css";
@@ -31,7 +32,10 @@ export default function RootLayout({
       suppressHydrationWarning
     >
       <body className="min-h-full flex flex-col" suppressHydrationWarning>
-        <ToastProvider>{children}</ToastProvider>
+        <ToastProvider>
+          {children}
+          <ChatbotWidget />
+        </ToastProvider>
       </body>
     </html>
   );
