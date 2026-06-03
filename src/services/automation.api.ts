@@ -151,6 +151,10 @@ export interface RealRecommendationRow {
   freshness?: Record<string, unknown>;
   relative_strength?: Record<string, unknown>;
   sector_breadth?: Record<string, unknown>;
+  market_regime?: Record<string, unknown>;
+  market_breadth?: Record<string, unknown>;
+  setup_validation?: Record<string, unknown>;
+  position_size_haircut?: Record<string, unknown>;
   settlement_pressure?: Record<string, unknown>;
   account_preflight?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
@@ -263,6 +267,39 @@ export interface DemoPortfolioReviewRunData {
   error?: string | null;
 }
 
+export type AiDecisionReuseStatus = "NEW" | "APPROVED" | "REJECTED" | "EXPIRED";
+
+export interface AiDecisionEventRow {
+  id: string;
+  created_at: string;
+  updated_at?: string | null;
+  workflow_type: string;
+  account_mode?: "REAL" | "DEMO" | string | null;
+  symbol?: string | null;
+  strategy_type?: string | null;
+  source_type?: string | null;
+  source_id?: string | null;
+  session_id?: string | null;
+  idempotency_key: string;
+  model?: string | null;
+  schema_version: string;
+  prompt_hash: string;
+  confidence?: number | null;
+  reuse_status: AiDecisionReuseStatus | string;
+  input_snapshot: Record<string, unknown>;
+  llm_recommendation: Record<string, unknown>;
+  final_system_decision: Record<string, unknown>;
+  guardrail_result: Record<string, unknown>;
+}
+
+export interface FetchAiDecisionEventsOptions {
+  limit?: number;
+  workflowType?: string;
+  symbol?: string;
+  accountMode?: "REAL" | "DEMO";
+  reuseStatus?: AiDecisionReuseStatus;
+}
+
 export async function fetchSchedulerStatus(accountMode: "REAL" | "DEMO"): Promise<SchedulerStatus> {
   try {
     const response = await httpClient.get<SchedulerStatus>(
@@ -347,6 +384,30 @@ export async function fetchShortTermRuns(
       success: boolean;
       data: ShortTermAutomationRunRow[];
     }>(`/automation/short-term/runs?limit=${encodeURIComponent(limit)}&account_mode=${encodeURIComponent(accountMode)}`);
+    return response.data.data ?? [];
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function fetchAiDecisionEvents(options: FetchAiDecisionEventsOptions = {}): Promise<AiDecisionEventRow[]> {
+  try {
+    const params = new URLSearchParams({ limit: String(options.limit ?? 50) });
+    if (options.workflowType?.trim()) {
+      params.set("workflow_type", options.workflowType.trim());
+    }
+    if (options.symbol?.trim()) {
+      params.set("symbol", options.symbol.trim().toUpperCase());
+    }
+    if (options.accountMode) {
+      params.set("account_mode", options.accountMode);
+    }
+    if (options.reuseStatus) {
+      params.set("reuse_status", options.reuseStatus);
+    }
+    const response = await httpClient.get<{ success: boolean; data: AiDecisionEventRow[] }>(
+      `/automation/ai-decisions?${params.toString()}`,
+    );
     return response.data.data ?? [];
   } catch (error) {
     throw normalizeError(error);
