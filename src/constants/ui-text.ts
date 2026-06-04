@@ -6,6 +6,7 @@ export const UI_TEXT = {
     watchlist: "Theo dõi",
     trade: "Giao dịch",
     news: "News",
+    longTerm: "Long-term",
     autoTrading: "Auto Trading",
     operations: "Giám sát vận hành",
   },

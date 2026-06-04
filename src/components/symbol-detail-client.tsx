@@ -1,6 +1,8 @@
 "use client";
 
+import { BarChart3 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { LongTermAnalysisPanel } from "@/components/long-term-analysis-panel";
 import { PriceChart } from "@/components/price-chart";
 import { FinancialRatioCharts } from "@/components/financial-ratio-charts";
 import { useToast } from "@/components/toast-provider";
@@ -17,7 +19,9 @@ import {
   getPriceHistory,
 } from "@/services/vnstock.api";
 import { fetchNewsBySymbol } from "@/services/news.api";
+import { analyzeLongTermSymbol } from "@/services/long-term.api";
 import type { NewsMailImpact } from "@/types/news";
+import type { LongTermAnalysisResult } from "@/types/long-term";
 import type {
   AiDataCompleteness,
   AiStructuredAnalysis,
@@ -528,8 +532,10 @@ export function SymbolDetailClient({
   const [errorMessage, setErrorMessage] = useState("");
   const [aiLoading, setAiLoading] = useState(false);
   const [shortAiLoading, setShortAiLoading] = useState(false);
+  const [longTermLoading, setLongTermLoading] = useState(false);
   const [aiAnalysis, setAiAnalysis] = useState("");
   const [shortAiAnalysis, setShortAiAnalysis] = useState("");
+  const [longTermAnalysis, setLongTermAnalysis] = useState<LongTermAnalysisResult | null>(null);
   const [aiStructured, setAiStructured] = useState<AiStructuredAnalysis | null>(null);
   const [aiCompleteness, setAiCompleteness] = useState<AiDataCompleteness | null>(null);
   const [showRawAiAnalysis, setShowRawAiAnalysis] = useState(false);
@@ -539,6 +545,7 @@ export function SymbolDetailClient({
   const didSkipInitialFetchRef = useRef(false);
   const [aiModalOpen, setAiModalOpen] = useState(false);
   const [shortModalOpen, setShortModalOpen] = useState(false);
+  const [longTermModalOpen, setLongTermModalOpen] = useState(false);
 
   useEffect(() => {
     setChartData(initialChartData);
@@ -759,6 +766,30 @@ export function SymbolDetailClient({
             >
               {shortAiLoading ? UI_TEXT.symbol.shortAiLoading : UI_TEXT.symbol.shortAiAnalyze}
             </button>
+            <button
+              type="button"
+              onClick={async () => {
+                setLongTermLoading(true);
+                try {
+                  const result = await analyzeLongTermSymbol(symbol);
+                  setLongTermAnalysis(result);
+                  setLongTermModalOpen(true);
+                } catch (error) {
+                  const message =
+                    error && typeof error === "object" && "message" in error
+                      ? String((error as { message?: unknown }).message)
+                      : UI_TEXT.symbol.loadFailed;
+                  showToast(message, "error");
+                } finally {
+                  setLongTermLoading(false);
+                }
+              }}
+              disabled={longTermLoading}
+              className="inline-flex h-9 items-center gap-2 rounded-md border border-emerald-300/50 bg-emerald-400/15 px-4 py-1.5 text-xs font-bold tracking-wide text-emerald-100 transition hover:bg-emerald-400/25 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <BarChart3 className="h-4 w-4" aria-hidden="true" />
+              {longTermLoading ? "Long-term running..." : "Long-term Analysis"}
+            </button>
           </div>
           <div className="flex flex-col items-end gap-2 sm:flex-row sm:items-center">
             <div className="flex flex-wrap items-center gap-2">
@@ -842,6 +873,18 @@ export function SymbolDetailClient({
         onClose={() => setShortModalOpen(false)}
       >
         <ShortAiPanel shortAiAnalysis={shortAiAnalysis} />
+      </AiResultModal>
+
+      <AiResultModal
+        open={longTermModalOpen}
+        title={`${symbol} - Long-term Analysis`}
+        onClose={() => setLongTermModalOpen(false)}
+      >
+        {longTermAnalysis ? (
+          <LongTermAnalysisPanel result={longTermAnalysis} />
+        ) : (
+          <p className="text-sm text-slate-400">No long-term analysis loaded.</p>
+        )}
       </AiResultModal>
 
       <section className="glass-panel rounded-xl p-6">
