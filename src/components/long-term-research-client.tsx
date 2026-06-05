@@ -1,9 +1,10 @@
 "use client";
 
-import { BarChart3, Info, Play, RefreshCw, Search, SlidersHorizontal, X } from "lucide-react";
+import { BarChart3, Database, Info, Play, RefreshCw, Search, ShieldCheck, SlidersHorizontal, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { LongTermAnalysisPanel } from "@/components/long-term-analysis-panel";
 import { useToast } from "@/components/toast-provider";
+import { fetchAiDecisionEvents, type AiDecisionEventRow } from "@/services/automation.api";
 import {
   analyzeLongTermSymbol,
   fetchLongTermRankings,
@@ -69,6 +70,118 @@ function asStringList(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
 }
 
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function MacroStrategyMemoryPanel({
+  rows,
+  loading,
+  error,
+}: {
+  rows: AiDecisionEventRow[];
+  loading: boolean;
+  error: string;
+}) {
+  const memory = rows[0];
+  const recommendation = asRecord(memory?.llm_recommendation);
+  const finalDecision = asRecord(memory?.final_system_decision);
+  const guardrail = asRecord(memory?.guardrail_result);
+  const allocation = asRecord(recommendation.allocation);
+  const allocationRows = Object.entries(allocation).filter(([, value]) => value !== null && value !== undefined && String(value).trim());
+  const rules = asStringList(recommendation.rules);
+  const metrics = asStringList(recommendation.monitoring_metrics);
+  const triggers = asStringList(recommendation.invalidation_triggers);
+  const assumptions = asStringList(recommendation.assumptions);
+  const scope = asStringList(finalDecision.scope);
+
+  return (
+    <section className="glass-panel rounded-xl p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wide text-cyan-200">Approved GPT Memory</p>
+          <h2 className="mt-2 text-xl font-semibold text-slate-100">
+            {asText(recommendation.title, "Macro strategy memory")}
+          </h2>
+          <p className="mt-1 max-w-3xl text-sm leading-6 text-slate-400">
+            {asText(recommendation.summary, "No approved macro strategy memory is loaded yet.")}
+          </p>
+        </div>
+        <div className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-slate-950/45 px-3 py-2 text-sm text-slate-300">
+          <Database className="h-4 w-4 text-cyan-200" aria-hidden="true" />
+          {memory ? memory.reuse_status : "No row"}
+        </div>
+      </div>
+
+      {loading ? (
+        <p className="mt-4 text-sm text-cyan-100">Loading approved memory...</p>
+      ) : error ? (
+        <p className="mt-4 rounded-md border border-amber-300/20 bg-amber-400/[0.06] p-3 text-sm text-amber-100">
+          {error}
+        </p>
+      ) : memory ? (
+        <div className="mt-5 space-y-4">
+          <div className="grid gap-3 lg:grid-cols-5">
+            {allocationRows.map(([key, value]) => (
+              <div key={key} className="rounded-lg border border-white/10 bg-slate-950/45 p-3">
+                <p className="text-xs text-slate-400">{key.replace(/_/g, " ")}</p>
+                <p className="mt-1 text-lg font-semibold text-slate-100">{String(value)}%</p>
+              </div>
+            ))}
+          </div>
+
+          <div className="grid gap-3 lg:grid-cols-2">
+            <div className="rounded-lg border border-emerald-300/20 bg-emerald-400/[0.06] p-3">
+              <p className="text-xs font-semibold text-emerald-200">Rules</p>
+              <ul className="mt-2 space-y-1 text-sm leading-6 text-emerald-50">
+                {(rules.length ? rules : ["No rules saved."]).slice(0, 8).map((item, idx) => (
+                  <li key={`${item}-${idx}`}>{item}</li>
+                ))}
+              </ul>
+            </div>
+            <div className="rounded-lg border border-rose-300/20 bg-rose-400/[0.06] p-3">
+              <p className="text-xs font-semibold text-rose-200">Invalidation Triggers</p>
+              <ul className="mt-2 space-y-1 text-sm leading-6 text-rose-50">
+                {(triggers.length ? triggers : ["No triggers saved."]).slice(0, 8).map((item, idx) => (
+                  <li key={`${item}-${idx}`}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          </div>
+
+          <div className="grid gap-3 lg:grid-cols-2">
+            <div className="rounded-lg border border-white/10 bg-slate-950/45 p-3">
+              <p className="text-xs font-semibold text-cyan-200">Monthly Metrics</p>
+              <p className="mt-2 text-sm leading-6 text-slate-300">{metrics.length ? metrics.join(" | ") : "-"}</p>
+            </div>
+            <div className="rounded-lg border border-white/10 bg-slate-950/45 p-3">
+              <p className="text-xs font-semibold text-cyan-200">Scope & Guardrail</p>
+              <p className="mt-2 text-sm leading-6 text-slate-300">
+                {(scope.length ? scope.join(" | ") : "macro_gpt_analysis | long_term_research")} |{" "}
+                {asText(guardrail.status, "CONTEXT_ONLY")}
+              </p>
+            </div>
+          </div>
+
+          {assumptions.length ? (
+            <div className="flex items-start gap-2 rounded-lg border border-cyan-300/20 bg-cyan-300/[0.06] p-3 text-sm leading-6 text-cyan-50">
+              <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+              <p>{assumptions.join(" | ")}</p>
+            </div>
+          ) : null}
+
+          <p className="text-xs leading-5 text-slate-500">
+            Source: /automation/ai-decisions?workflow_type=MACRO_STRATEGY_MEMORY | {memory.source_id} |{" "}
+            {new Date(memory.created_at).toLocaleString()}
+          </p>
+        </div>
+      ) : (
+        <p className="mt-4 text-sm text-slate-400">No approved macro strategy memory found.</p>
+      )}
+    </section>
+  );
+}
+
 function MacroSummary({
   macro,
   macroGpt,
@@ -129,7 +242,8 @@ function MacroSummary({
           </div>
           {macroGpt ? (
             <span className="rounded-md border border-white/10 bg-slate-950/45 px-2 py-1 text-xs text-slate-300">
-              {macroGpt.model} | {new Date(macroGpt.generated_at).toLocaleString()}
+              {macroGpt.model} | {new Date(macroGpt.generated_at).toLocaleString()} |{" "}
+              {macroGpt.cached ? "cached" : "fresh"} until end of day
             </span>
           ) : null}
         </div>
@@ -211,6 +325,9 @@ export function LongTermResearchClient() {
   const [macroGpt, setMacroGpt] = useState<MacroGptAnalysisResponse | null>(null);
   const [macroGptLoading, setMacroGptLoading] = useState(false);
   const [macroGptError, setMacroGptError] = useState("");
+  const [strategyMemory, setStrategyMemory] = useState<AiDecisionEventRow[]>([]);
+  const [strategyMemoryLoading, setStrategyMemoryLoading] = useState(false);
+  const [strategyMemoryError, setStrategyMemoryError] = useState("");
   const [rankings, setRankings] = useState<LongTermAnalysisResult[]>([]);
   const [selected, setSelected] = useState<LongTermAnalysisResult | null>(null);
   const [detailLoadingSymbol, setDetailLoadingSymbol] = useState<string | null>(null);
@@ -225,7 +342,7 @@ export function LongTermResearchClient() {
   const [minScore, setMinScore] = useState(0);
   const [maxScore, setMaxScore] = useState(100);
 
-  const loadMacroGpt = useCallback(async (forceRefresh = false) => {
+  const loadMacroGpt = useCallback(async () => {
     setMacroGptLoading(true);
     setMacroGptError("");
     try {
@@ -233,7 +350,7 @@ export function LongTermResearchClient() {
         newsLimit: 40,
         observationLimit: 80,
         language: "vi",
-        forceRefresh,
+        forceRefresh: false,
       });
       setMacroGpt(result);
     } catch (error) {
@@ -241,6 +358,24 @@ export function LongTermResearchClient() {
       setMacroGptError(message);
     } finally {
       setMacroGptLoading(false);
+    }
+  }, []);
+
+  const loadStrategyMemory = useCallback(async () => {
+    setStrategyMemoryLoading(true);
+    setStrategyMemoryError("");
+    try {
+      const rows = await fetchAiDecisionEvents({
+        limit: 5,
+        workflowType: "MACRO_STRATEGY_MEMORY",
+        reuseStatus: "APPROVED",
+      });
+      setStrategyMemory(rows);
+    } catch (error) {
+      const message = (error as AppError).message || "Failed to load approved macro strategy memory.";
+      setStrategyMemoryError(message);
+    } finally {
+      setStrategyMemoryLoading(false);
     }
   }, []);
 
@@ -255,12 +390,13 @@ export function LongTermResearchClient() {
       const [macroResult, rankingsResult] = await Promise.all([
         fetchMacroRegime({ forceRefresh }),
         fetchLongTermRankings({ limit: 100, forceRefresh }),
+        loadStrategyMemory(),
       ]);
       setMacro(macroResult);
       setRankings(rankingsResult.data.items ?? []);
       setLatestRunId(rankingsResult.data.items?.[0]?.run_id ?? rankingsResult.data.run_id ?? null);
       setLoading(false);
-      await loadMacroGpt(forceRefresh);
+      await loadMacroGpt();
     } catch (error) {
       const message = (error as AppError).message || "Failed to load long-term research.";
       setErrorMessage(message);
@@ -269,7 +405,7 @@ export function LongTermResearchClient() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [loadMacroGpt, showToast]);
+  }, [loadMacroGpt, loadStrategyMemory, showToast]);
 
   useEffect(() => {
     void loadData();
@@ -309,7 +445,7 @@ export function LongTermResearchClient() {
       } catch {
         setMacro(null);
       }
-      await loadMacroGpt(true);
+      await loadMacroGpt();
       showToast(`Long-term scan completed: ${result.scored_count} symbols`, "success");
     } catch (error) {
       const message = (error as AppError).message || "Long-term scan failed.";
@@ -514,6 +650,12 @@ export function LongTermResearchClient() {
           </table>
         </div>
       </section>
+
+      <MacroStrategyMemoryPanel
+        rows={strategyMemory}
+        loading={strategyMemoryLoading}
+        error={strategyMemoryError}
+      />
 
       {selected ? (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
