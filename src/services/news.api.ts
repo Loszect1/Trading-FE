@@ -1,4 +1,9 @@
-import { API_REQUEST_TIMEOUT_MS, getWithRetryCache, postWithRetryCache } from "@/services/http-client";
+import {
+  API_NO_TIMEOUT_MS,
+  API_REQUEST_TIMEOUT_MS,
+  getWithRetryCache,
+  postWithRetryCache,
+} from "@/services/http-client";
 import type {
   MorningBriefResponse,
   NewsBySymbolResponse,
@@ -109,7 +114,7 @@ export async function refreshMailNewsFromGmail(): Promise<NewsMailRefreshRespons
       article_fetch_limit: 100,
     },
     {
-      timeoutMs: API_REQUEST_TIMEOUT_MS,
+      timeoutMs: API_NO_TIMEOUT_MS,
       retries: 0,
       cacheTtlMs: 0,
       skipCache: true,
