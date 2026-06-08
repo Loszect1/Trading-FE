@@ -268,6 +268,37 @@ export interface DemoPortfolioReviewRunData {
 }
 
 export type AiDecisionReuseStatus = "NEW" | "APPROVED" | "REJECTED" | "EXPIRED";
+export type AiMemoryWorkflowType =
+  | "MACRO_STRATEGY_MEMORY"
+  | "RISK_MANAGEMENT_MEMORY"
+  | "TECHNICAL_PATTERN_MEMORY"
+  | "MARKET_STRUCTURE_MEMORY"
+  | "FUNDAMENTAL_THESIS_MEMORY"
+  | "OTHER_STRATEGY_CONTEXT";
+
+export const AI_MEMORY_WORKFLOW_TYPES: readonly AiMemoryWorkflowType[] = [
+  "MACRO_STRATEGY_MEMORY",
+  "RISK_MANAGEMENT_MEMORY",
+  "TECHNICAL_PATTERN_MEMORY",
+  "MARKET_STRUCTURE_MEMORY",
+  "FUNDAMENTAL_THESIS_MEMORY",
+  "OTHER_STRATEGY_CONTEXT",
+];
+
+export interface AiMemoryEvidenceSourceRow {
+  id: string;
+  event_id: string;
+  created_at: string;
+  filename: string;
+  content_type: string;
+  file_sha256: string;
+  file_size_bytes: number;
+  extraction_method: string;
+  extracted_text?: string;
+  excerpt?: string;
+  metadata?: Record<string, unknown>;
+  warnings?: unknown[];
+}
 
 export interface AiDecisionEventRow {
   id: string;
@@ -290,10 +321,14 @@ export interface AiDecisionEventRow {
   llm_recommendation: Record<string, unknown>;
   final_system_decision: Record<string, unknown>;
   guardrail_result: Record<string, unknown>;
+  evidence_count?: number;
+  evidence_sources?: AiMemoryEvidenceSourceRow[];
+  review_notes?: string | null;
 }
 
 export interface FetchAiDecisionEventsOptions {
   limit?: number;
+  offset?: number;
   workflowType?: string;
   symbol?: string;
   accountMode?: "REAL" | "DEMO";
@@ -409,6 +444,38 @@ export async function fetchAiDecisionEvents(options: FetchAiDecisionEventsOption
       `/automation/ai-decisions?${params.toString()}`,
     );
     return response.data.data ?? [];
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function fetchAiMemoryEvents(options: FetchAiDecisionEventsOptions = {}): Promise<AiDecisionEventRow[]> {
+  try {
+    const params = new URLSearchParams({
+      limit: String(options.limit ?? 30),
+      offset: String(options.offset ?? 0),
+    });
+    if (options.workflowType?.trim()) {
+      params.set("workflow_type", options.workflowType.trim());
+    }
+    if (options.reuseStatus) {
+      params.set("reuse_status", options.reuseStatus);
+    }
+    const response = await httpClient.get<{ success: boolean; data: AiDecisionEventRow[] }>(
+      `/automation/ai-memory?${params.toString()}`,
+    );
+    return response.data.data ?? [];
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function fetchAiMemoryDetail(eventId: string): Promise<AiDecisionEventRow> {
+  try {
+    const response = await httpClient.get<{ success: boolean; data: AiDecisionEventRow }>(
+      `/automation/ai-memory/${encodeURIComponent(eventId)}`,
+    );
+    return response.data.data;
   } catch (error) {
     throw normalizeError(error);
   }
@@ -596,6 +663,88 @@ export async function postRealRecommendationActionBuy(body: RealRecommendationAc
     const response = await httpClient.post<Record<string, unknown>>("/automation/real/recommendations/action-buy", body, {
       timeout: API_NO_TIMEOUT_MS,
     });
+    return response.data;
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+// --- Long-term memory contribution (Approved GPT Memory enhancement) ---
+
+export interface MemoryContributionAnalysisReport {
+  verified_facts?: string[];
+  contradictions_or_issues?: string[];
+  gaps_or_missing?: string[];
+  suggested_workflow_type?: string;
+  overall_assessment?: string;
+  research_notes?: string;
+}
+
+export interface MemoryContributionResponse {
+  success: boolean;
+  data: {
+    analysis_report: MemoryContributionAnalysisReport;
+    proposed_llm_recommendation: Record<string, unknown>;
+    proposed_final_system_decision: Record<string, unknown>;
+    proposed_guardrail: Record<string, unknown>;
+    confidence: number;
+    suggested_workflow_type?: string;
+    recorded_event: AiDecisionEventRow;
+    evidence_sources?: AiMemoryEvidenceSourceRow[];
+    workflow_type_used: string;
+  };
+}
+
+export async function contributeToGptMemory(formData: FormData): Promise<MemoryContributionResponse> {
+  try {
+    // httpClient (axios) will set the correct multipart boundary when FormData is passed
+    const response = await httpClient.post<MemoryContributionResponse>(
+      "/automation/ai-memory/contribute",
+      formData,
+      {
+        headers: { "Content-Type": "multipart/form-data" },
+        timeout: API_NO_TIMEOUT_MS,
+      },
+    );
+    return response.data;
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function updateAiDecisionReuseStatus(
+  eventId: string,
+  reuseStatus: AiDecisionReuseStatus,
+): Promise<{ success: boolean; data: AiDecisionEventRow }> {
+  try {
+    const response = await httpClient.post<{ success: boolean; data: AiDecisionEventRow }>(
+      `/automation/ai-decisions/${encodeURIComponent(eventId)}/status`,
+      { reuse_status: reuseStatus },
+    );
+    return response.data;
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export interface AiMemoryReviewRequest {
+  reuse_status: AiDecisionReuseStatus;
+  workflow_type: AiMemoryWorkflowType | string;
+  llm_recommendation: Record<string, unknown>;
+  final_system_decision: Record<string, unknown>;
+  guardrail_result: Record<string, unknown>;
+  review_notes?: string | null;
+}
+
+export async function reviewAiMemoryEvent(
+  eventId: string,
+  body: AiMemoryReviewRequest,
+): Promise<{ success: boolean; data: AiDecisionEventRow }> {
+  try {
+    const response = await httpClient.post<{ success: boolean; data: AiDecisionEventRow }>(
+      `/automation/ai-memory/${encodeURIComponent(eventId)}/review`,
+      body,
+    );
     return response.data;
   } catch (error) {
     throw normalizeError(error);
